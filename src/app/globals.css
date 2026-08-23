@@ -270,6 +270,27 @@ body {
    RESPONSIVE DESIGN SYSTEM OVERRIDES & UTILITIES
    ============================================================================ */
 
+/* Shared table row hover (usable from Server Components) */
+.table-row {
+  transition: var(--transition-fast);
+}
+
+.table-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* Back link used on detail pages */
+.back-link {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.9rem;
+  transition: var(--transition-fast);
+}
+
+.back-link:hover {
+  color: var(--text-primary);
+}
+
 /* Responsive Grid Utilities */
 .responsive-grid-2-1 {
   display: grid;

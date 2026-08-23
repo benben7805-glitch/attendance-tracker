@@ -17,8 +17,14 @@ CREATE TABLE IF NOT EXISTS students (
 CREATE TABLE IF NOT EXISTS subjects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
+    type TEXT NOT NULL DEFAULT 'theory' CHECK (type IN ('theory', 'practical', 'clinics')),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
 );
+
+-- 2a. Migration for existing databases: add the "type" column to subjects
+-- (safe to run multiple times - it does nothing if the column already exists)
+ALTER TABLE subjects ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'theory'
+CHECK (type IN ('theory', 'practical', 'clinics'));
 
 -- 3. Create weekly_schedule table (holds the template for weekly classes)
 CREATE TABLE IF NOT EXISTS weekly_schedule (

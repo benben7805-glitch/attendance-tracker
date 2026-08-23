@@ -2,6 +2,7 @@
 
 import { cookies } from 'next/headers';
 import { supabase } from '@/lib/supabase';
+import { normalizeSubjectType } from '@/lib/attendance';
 
 // ==========================================
 // AUTH ACTIONS
@@ -120,14 +121,14 @@ export async function getSubjects() {
   return data || [];
 }
 
-export async function addSubject(name: string) {
+export async function addSubject(name: string, type: string) {
   if (!name.trim()) {
     throw new Error('Subject Name is required.');
   }
 
   const { data, error } = await supabase
     .from('subjects')
-    .insert([{ name: name.trim() }])
+    .insert([{ name: name.trim(), type: normalizeSubjectType(type) }])
     .select();
 
   if (error) {
@@ -147,6 +148,95 @@ export async function deleteSubject(id: string) {
 
   if (error) throw new Error(error.message);
   return { success: true };
+}
+
+export async function getSubjectAttendanceReport(subjectId: string) {
+  // 1. Get the subject
+  const { data: subject, error: subjectError } = await supabase
+    .from('subjects')
+    .select('*')
+    .eq('id', subjectId)
+    .single();
+
+  if (subjectError || !subject) {
+    throw new Error('Subject not found.');
+  }
+
+  // 2. Get all students
+  const { data: students, error: studentsError } = await supabase
+    .from('students')
+    .select('*')
+    .order('name', { ascending: true });
+
+  if (studentsError) throw new Error(studentsError.message);
+
+  // 3. Get all classes held for this subject
+  const { data: classes, error: classesError } = await supabase
+    .from('classes')
+    .select('*')
+    .eq('subject_id', subjectId)
+    .order('date', { ascending: false })
+    .order('start_time', { ascending: false });
+
+  if (classesError) throw new Error(classesError.message);
+
+  // 4. Get attendance records for those classes
+  let attendanceRecords: { class_id: string; student_roll_number: string; status: string }[] = [];
+  if (classes && classes.length > 0) {
+    const classIds = classes.map((c) => c.id);
+    const { data, error } = await supabase
+      .from('attendance')
+      .select('class_id, student_roll_number, status')
+      .in('class_id', classIds);
+
+    if (error) throw new Error(error.message);
+    attendanceRecords = data || [];
+  }
+
+  // Per-student tally: rollNumber -> { attended, absent }
+  const tallyMap = new Map<string, { attended: number; absent: number }>();
+  attendanceRecords.forEach((rec) => {
+    const tally = tallyMap.get(rec.student_roll_number) || { attended: 0, absent: 0 };
+    if (rec.status === 'present') {
+      tally.attended += 1;
+    } else if (rec.status === 'absent') {
+      tally.absent += 1;
+    }
+    tallyMap.set(rec.student_roll_number, tally);
+  });
+
+  const rows =
+    students?.map((s) => {
+      const tally = tallyMap.get(s.roll_number) || { attended: 0, absent: 0 };
+      const totalClasses = tally.attended + tally.absent;
+      return {
+        rollNumber: s.roll_number,
+        name: s.name,
+        attended: tally.attended,
+        absent: tally.absent,
+        totalClasses,
+        pct: totalClasses > 0 ? Math.round((tally.attended / totalClasses) * 100) : null,
+      };
+    }) || [];
+
+  // Lowest attendance first (students with no marked classes go last)
+  rows.sort((a, b) => {
+    if (a.pct === null && b.pct === null) return a.name.localeCompare(b.name);
+    if (a.pct === null) return 1;
+    if (b.pct === null) return -1;
+    if (a.pct !== b.pct) return a.pct - b.pct;
+    return a.name.localeCompare(b.name);
+  });
+
+  return {
+    subject: {
+      id: subject.id,
+      name: subject.name,
+      type: normalizeSubjectType(subject.type),
+    },
+    totalClassesHeld: classes?.length || 0,
+    rows,
+  };
 }
 
 // ==========================================
@@ -387,7 +477,7 @@ export async function getStudentReport(rollNumber: string) {
   // Compile stats per subject
   const subjectStatsMap = new Map<
     string,
-    { id: string; name: string; totalClasses: number; attended: number; absent: number }
+    { id: string; name: string; type: string; totalClasses: number; attended: number; absent: number }
   >();
 
   // Initialize with 0s for all subjects
@@ -395,6 +485,7 @@ export async function getStudentReport(rollNumber: string) {
     subjectStatsMap.set(sub.id, {
       id: sub.id,
       name: sub.name,
+      type: normalizeSubjectType(sub.type),
       totalClasses: 0,
       attended: 0,
       absent: 0,

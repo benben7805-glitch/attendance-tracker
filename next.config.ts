@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // exceljs uses dynamic requires and must not be bundled
+  serverExternalPackages: ["exceljs"],
 };
 
 export default nextConfig;

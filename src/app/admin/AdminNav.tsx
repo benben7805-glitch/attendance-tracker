@@ -16,6 +16,7 @@ const navItems: NavItem[] = [
   { label: 'Manage Students', href: '/admin/students', icon: '👨‍🎓' },
   { label: 'Manage Subjects', href: '/admin/subjects', icon: '📚' },
   { label: 'Weekly Schedule', href: '/admin/schedule', icon: '⏳' },
+  { label: 'Backup', href: '/admin/backup', icon: '💾' },
 ];
 
 export default function AdminNav() {

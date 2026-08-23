@@ -3,10 +3,17 @@
 import { useState, useEffect, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSession, getStudentReport, logoutAction } from '@/app/actions';
+import {
+  getSubjectTypeOption,
+  getMinAttendance,
+  meetsMinimumAttendance,
+  classesNeededToReachMinimum,
+} from '@/lib/attendance';
 
 interface SubjectStat {
   id: string;
   name: string;
+  type: string;
   totalClasses: number;
   attended: number;
   absent: number;
@@ -139,11 +146,28 @@ export default function StudentDashboard() {
         <div style={cardsGridStyle}>
           {subjectStats.map((stat) => {
             const pct = stat.totalClasses > 0 ? Math.round((stat.attended / stat.totalClasses) * 100) : null;
-            const isOnTrack = pct !== null && pct >= 75;
+            const minRequired = getMinAttendance(stat.type);
+            const typeOption = getSubjectTypeOption(stat.type);
+            // Exact-ratio comparison so rounding never hides a shortfall
+            const isOnTrack = pct !== null && meetsMinimumAttendance(stat.attended, stat.totalClasses, minRequired);
+            const classesNeeded = classesNeededToReachMinimum(stat.attended, stat.totalClasses, minRequired);
             
             return (
               <div key={stat.id} className="glass-panel" style={cardStyle}>
-                <h3 style={cardSubjectTitleStyle}>{stat.name}</h3>
+                <div>
+                  <h3 style={cardSubjectTitleStyle}>{stat.name}</h3>
+                  <span
+                    style={{
+                      fontSize: '0.72rem',
+                      fontWeight: '600',
+                      color: 'var(--text-muted)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px',
+                    }}
+                  >
+                    {typeOption.icon} {typeOption.label} · Min {minRequired}%
+                  </span>
+                </div>
                 
                 <div style={cardDataContainerStyle}>
                   {pct !== null ? (
@@ -209,6 +233,21 @@ export default function StudentDashboard() {
                     <span>Attended: <strong>{stat.attended}</strong></span>
                     <span>Total Held: <strong>{stat.totalClasses}</strong></span>
                   </div>
+
+                  {/* Requirement status */}
+                  {pct !== null && (
+                    isOnTrack ? (
+                      <div style={requirementOkStyle}>
+                        ✓ Meets the {minRequired}% minimum for {typeOption.label.toLowerCase()}
+                      </div>
+                    ) : (
+                      <div style={requirementWarningStyle}>
+                        ⚠️ Below the {minRequired}% {typeOption.label.toLowerCase()} requirement — attend{' '}
+                        <strong>{classesNeeded}</strong> more class{classesNeeded === 1 ? '' : 'es'} to reach{' '}
+                        {minRequired}%
+                      </div>
+                    )
+                  )}
                 </div>
               </div>
             );
@@ -439,6 +478,26 @@ const ratioTextStyle: React.CSSProperties = {
   justifyContent: 'space-between',
   fontSize: '0.8rem',
   color: 'var(--text-secondary)',
+};
+
+const requirementOkStyle: React.CSSProperties = {
+  fontSize: '0.8rem',
+  fontWeight: '500',
+  color: 'var(--success)',
+  background: 'var(--success-glow)',
+  padding: '8px 12px',
+  borderRadius: '8px',
+};
+
+const requirementWarningStyle: React.CSSProperties = {
+  fontSize: '0.8rem',
+  fontWeight: '500',
+  color: 'var(--danger)',
+  background: 'var(--danger-glow)',
+  border: '1px solid rgba(239, 68, 68, 0.25)',
+  padding: '10px 12px',
+  borderRadius: '8px',
+  lineHeight: '1.5',
 };
 
 
