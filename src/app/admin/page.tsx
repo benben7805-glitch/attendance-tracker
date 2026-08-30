@@ -5,12 +5,12 @@ import {
   getClassesForDate,
   addCustomClass,
   deleteClass,
-  initializeClassesFromSchedule,
   getSubjects,
   getStudents,
   getClassAttendance,
   saveAttendance,
 } from '@/app/actions';
+import { getSubjectTypeOption, SubjectType } from '@/lib/attendance';
 
 interface Subject {
   id: string;
@@ -31,6 +31,7 @@ interface ClassItem {
   subjects: {
     id: string;
     name: string;
+    type?: string;
   };
 }
 
@@ -109,26 +110,6 @@ export default function DailyManagerPage() {
     }
     loadClasses();
   }, [date]);
-
-  // Load classes from Weekly Schedule template
-  const handleLoadFromSchedule = async () => {
-    setError(null);
-    setSuccessMsg(null);
-    startTransition(async () => {
-      try {
-        const result = await initializeClassesFromSchedule(date);
-        if (result.success) {
-          setSuccessMsg(result.message);
-          const updatedClasses = await getClassesForDate(date);
-          setClasses(updatedClasses as unknown as ClassItem[]);
-        } else {
-          setError(result.message || 'No scheduled classes found for this weekday.');
-        }
-      } catch (err: any) {
-        setError(err.message || 'Failed to load classes from schedule.');
-      }
-    });
-  };
 
   // Create custom class
   const handleAddClass = async (e: React.FormEvent) => {
@@ -283,30 +264,20 @@ export default function DailyManagerPage() {
         <div className="responsive-grid-2-1">
           {/* Class List Panel */}
           <section className="glass-panel" style={panelStyle}>
-            <div style={panelHeaderStyle}>
-              <h2 style={panelTitleStyle}>Scheduled Classes</h2>
-              <button
-                onClick={handleLoadFromSchedule}
-                className="btn btn-secondary"
-                disabled={actionPending || classes.length > 0}
-                style={{ fontSize: '0.85rem', padding: '8px 12px' }}
-                title="Initialize classes from the weekly schedule template for this weekday"
-              >
-                🔄 Load Template
-              </button>
-            </div>
+            <h2 style={panelTitleStyle}>Scheduled Classes</h2>
 
             {classes.length === 0 ? (
               <div style={emptyStateStyle}>
-                <p>No classes initialized for this date.</p>
+                <p>No classes added for this date.</p>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                  Click "Load Template" above or add a custom class using the form.
+                  Add a class using the form on the right.
                 </p>
               </div>
             ) : (
               <div style={classListStyle}>
                 {classes.map((cls) => {
                   const isActive = activeClassId === cls.id;
+                  const typeOption = getSubjectTypeOption(cls.subjects?.type);
                   return (
                     <div
                       key={cls.id}
@@ -317,7 +288,19 @@ export default function DailyManagerPage() {
                       }}
                     >
                       <div style={classInfoStyle}>
-                        <span style={classSubjectStyle}>{cls.subjects?.name}</span>
+                        <div style={classSubjectRowStyle}>
+                          <span style={classSubjectStyle}>{cls.subjects?.name}</span>
+                          <span
+                            style={{
+                              ...typeBadgeBaseStyle,
+                              color: typeBadgeColors[typeOption.value].text,
+                              background: typeBadgeColors[typeOption.value].bg,
+                              border: `1px solid ${typeBadgeColors[typeOption.value].border}`,
+                            }}
+                          >
+                            {typeOption.icon} {typeOption.label}
+                          </span>
+                        </div>
                         <span style={classTimeStyle}>
                           🕒 {cls.start_time.substring(0, 5)} - {cls.end_time.substring(0, 5)}
                         </span>
@@ -423,7 +406,13 @@ export default function DailyManagerPage() {
                 <strong style={{ color: 'var(--text-primary)' }}>
                   {classes.find((c) => c.id === activeClassId)?.subjects?.name}
                 </strong>{' '}
-                | Time:{' '}
+                (
+                {
+                  getSubjectTypeOption(
+                    classes.find((c) => c.id === activeClassId)?.subjects?.type
+                  ).label
+                }
+                ) | Time:{' '}
                 {classes.find((c) => c.id === activeClassId)?.start_time.substring(0, 5)} -{' '}
                 {classes.find((c) => c.id === activeClassId)?.end_time.substring(0, 5)}
               </p>
@@ -591,15 +580,42 @@ const panelStyle: React.CSSProperties = {
   gap: '16px',
 };
 
-const panelHeaderStyle: React.CSSProperties = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-};
-
 const panelTitleStyle: React.CSSProperties = {
   fontSize: '1.2rem',
   fontWeight: '600',
+};
+
+const classSubjectRowStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  flexWrap: 'wrap',
+};
+
+const typeBadgeBaseStyle: React.CSSProperties = {
+  fontSize: '0.72rem',
+  fontWeight: '600',
+  padding: '2px 10px',
+  borderRadius: '999px',
+  whiteSpace: 'nowrap',
+};
+
+const typeBadgeColors: Record<SubjectType, { text: string; bg: string; border: string }> = {
+  theory: {
+    text: '#a78bfa',
+    bg: 'rgba(139, 92, 246, 0.12)',
+    border: 'rgba(139, 92, 246, 0.35)',
+  },
+  practical: {
+    text: '#60a5fa',
+    bg: 'rgba(59, 130, 246, 0.12)',
+    border: 'rgba(59, 130, 246, 0.35)',
+  },
+  clinics: {
+    text: '#34d399',
+    bg: 'rgba(16, 185, 129, 0.12)',
+    border: 'rgba(16, 185, 129, 0.35)',
+  },
 };
 
 const emptyStateStyle: React.CSSProperties = {

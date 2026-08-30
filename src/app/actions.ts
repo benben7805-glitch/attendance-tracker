@@ -135,6 +135,11 @@ export async function addSubject(name: string, type: string) {
     if (error.code === '23505') {
       throw new Error('Subject with this name already exists.');
     }
+    if (error.code === 'PGRST204') {
+      throw new Error(
+        'Database schema is out of date. Run the migration in supabase_schema.sql (Supabase Dashboard > SQL Editor).'
+      );
+    }
     throw new Error(error.message);
   }
   return data;
@@ -240,60 +245,13 @@ export async function getSubjectAttendanceReport(subjectId: string) {
 }
 
 // ==========================================
-// WEEKLY SCHEDULE ACTIONS
-// ==========================================
-
-export async function getWeeklySchedule() {
-  const { data, error } = await supabase
-    .from('weekly_schedule')
-    .select('*, subjects(id, name)')
-    .order('day_of_week', { ascending: true })
-    .order('start_time', { ascending: true });
-
-  if (error) throw new Error(error.message);
-  return data || [];
-}
-
-export async function addWeeklySchedule(
-  subjectId: string,
-  dayOfWeek: number,
-  startTime: string,
-  endTime: string
-) {
-  const { data, error } = await supabase
-    .from('weekly_schedule')
-    .insert([
-      {
-        subject_id: subjectId,
-        day_of_week: dayOfWeek,
-        start_time: startTime,
-        end_time: endTime,
-      },
-    ])
-    .select();
-
-  if (error) throw new Error(error.message);
-  return data;
-}
-
-export async function deleteWeeklySchedule(id: string) {
-  const { error } = await supabase
-    .from('weekly_schedule')
-    .delete()
-    .eq('id', id);
-
-  if (error) throw new Error(error.message);
-  return { success: true };
-}
-
-// ==========================================
 // CLASSES & DAILY MANAGER ACTIONS
 // ==========================================
 
 export async function getClassesForDate(dateStr: string) {
   const { data, error } = await supabase
     .from('classes')
-    .select('*, subjects(id, name)')
+    .select('*, subjects(id, name, type)')
     .eq('date', dateStr)
     .order('start_time', { ascending: true });
 
@@ -336,59 +294,6 @@ export async function deleteClass(classId: string) {
 
   if (error) throw new Error(error.message);
   return { success: true };
-}
-
-export async function initializeClassesFromSchedule(dateStr: string) {
-  // Parse day of week from dateStr (format YYYY-MM-DD)
-  // Note: JavaScript Date.getDay() uses 0 for Sunday, 1 for Monday, etc.
-  const dateObj = new Date(dateStr);
-  const dayOfWeek = dateObj.getDay();
-
-  // Fetch weekly schedule for this day of week
-  const { data: scheduleItems, error: scheduleError } = await supabase
-    .from('weekly_schedule')
-    .select('*')
-    .eq('day_of_week', dayOfWeek);
-
-  if (scheduleError) throw new Error(scheduleError.message);
-
-  if (!scheduleItems || scheduleItems.length === 0) {
-    return { success: false, message: 'No classes in weekly schedule for this day.' };
-  }
-
-  // Fetch existing classes for this date to avoid duplicate insertion
-  const { data: existingClasses, error: existingError } = await supabase
-    .from('classes')
-    .select('*')
-    .eq('date', dateStr);
-
-  if (existingError) throw new Error(existingError.message);
-
-  const existingTimes = new Set(
-    existingClasses?.map((c) => `${c.subject_id}_${c.start_time}`) || []
-  );
-
-  // Filter schedule items to insert
-  const itemsToInsert = scheduleItems
-    .filter((s) => !existingTimes.has(`${s.subject_id}_${s.start_time}`))
-    .map((s) => ({
-      subject_id: s.subject_id,
-      date: dateStr,
-      start_time: s.start_time,
-      end_time: s.end_time,
-    }));
-
-  if (itemsToInsert.length === 0) {
-    return { success: true, message: 'All scheduled classes are already initialized for this day.' };
-  }
-
-  const { error: insertError } = await supabase
-    .from('classes')
-    .insert(itemsToInsert);
-
-  if (insertError) throw new Error(insertError.message);
-
-  return { success: true, message: `Successfully loaded ${itemsToInsert.length} classes.` };
 }
 
 // ==========================================

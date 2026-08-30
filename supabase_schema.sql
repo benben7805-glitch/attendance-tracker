@@ -26,17 +26,11 @@ CREATE TABLE IF NOT EXISTS subjects (
 ALTER TABLE subjects ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'theory'
 CHECK (type IN ('theory', 'practical', 'clinics'));
 
--- 3. Create weekly_schedule table (holds the template for weekly classes)
-CREATE TABLE IF NOT EXISTS weekly_schedule (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE NOT NULL,
-    day_of_week INTEGER NOT NULL CHECK (day_of_week >= 0 AND day_of_week <= 6), -- 0 = Sunday, 1 = Monday, 2 = Tuesday, etc.
-    start_time TIME NOT NULL,
-    end_time TIME NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
-);
+-- 2b. Migration for existing databases: remove the weekly_schedule table
+-- (the weekly schedule feature has been removed from the app)
+DROP TABLE IF EXISTS weekly_schedule;
 
--- 4. Create classes table (actual class instances held on specific dates)
+-- 3. Create classes table (actual class instances held on specific dates)
 CREATE TABLE IF NOT EXISTS classes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE NOT NULL,
@@ -70,13 +64,11 @@ CREATE TABLE IF NOT EXISTS attendance (
 
 ALTER TABLE students ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subjects ENABLE ROW LEVEL SECURITY;
-ALTER TABLE weekly_schedule ENABLE ROW LEVEL SECURITY;
 ALTER TABLE classes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance ENABLE ROW LEVEL SECURITY;
 
 -- Create permissive policies for application access (Next.js server-side / client-side)
 CREATE POLICY "Allow read/write access for all users" ON students FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow read/write access for all users" ON subjects FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow read/write access for all users" ON weekly_schedule FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow read/write access for all users" ON classes FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow read/write access for all users" ON attendance FOR ALL USING (true) WITH CHECK (true);

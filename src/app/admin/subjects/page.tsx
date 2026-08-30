@@ -69,7 +69,7 @@ export default function ManageSubjectsPage() {
 
   // Handle subject deletion
   const handleDeleteSubject = async (id: string, name: string) => {
-    if (!confirm(`Are you sure you want to delete subject "${name}"? This will permanently delete all weekly schedules and attendance records for this subject.`)) {
+    if (!confirm(`Are you sure you want to delete subject "${name}"? This will permanently delete all classes and attendance records for this subject.`)) {
       return;
     }
     setError(null);

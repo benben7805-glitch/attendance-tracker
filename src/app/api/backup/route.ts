@@ -53,14 +53,9 @@ export async function GET() {
 
   try {
     // Fetch everything
-    const [studentsRes, subjectsRes, scheduleRes, classesRes, attendanceRes] = await Promise.all([
+    const [studentsRes, subjectsRes, classesRes, attendanceRes] = await Promise.all([
       supabase.from('students').select('*').order('name', { ascending: true }),
       supabase.from('subjects').select('*').order('name', { ascending: true }),
-      supabase
-        .from('weekly_schedule')
-        .select('*, subjects(id, name)')
-        .order('day_of_week', { ascending: true })
-        .order('start_time', { ascending: true }),
       supabase
         .from('classes')
         .select('*, subjects(id, name)')
@@ -70,16 +65,11 @@ export async function GET() {
     ]);
 
     const firstError =
-      studentsRes.error ||
-      subjectsRes.error ||
-      scheduleRes.error ||
-      classesRes.error ||
-      attendanceRes.error;
+      studentsRes.error || subjectsRes.error || classesRes.error || attendanceRes.error;
     if (firstError) throw new Error(firstError.message);
 
     const students = studentsRes.data || [];
     const subjects = subjectsRes.data || [];
-    const schedule = scheduleRes.data || [];
     const classes = classesRes.data || [];
     const attendance = attendanceRes.data || [];
 
@@ -136,25 +126,7 @@ export async function GET() {
       ])
     );
 
-    // Sheet 3: Weekly Schedule
-    addSheet(
-      workbook,
-      'Weekly Schedule',
-      [
-        { header: 'Day', key: 'day', width: 14 },
-        { header: 'Subject', key: 'subject', width: 35 },
-        { header: 'Start Time', key: 'start', width: 12 },
-        { header: 'End Time', key: 'end', width: 12 },
-      ],
-      schedule.map((item) => [
-        DAY_NAMES[item.day_of_week] || item.day_of_week,
-        item.subjects?.name || 'Unknown',
-        formatTime(item.start_time),
-        formatTime(item.end_time),
-      ])
-    );
-
-    // Sheet 4: Classes
+    // Sheet 3: Classes
     addSheet(
       workbook,
       'Classes',
@@ -174,7 +146,7 @@ export async function GET() {
       ])
     );
 
-    // Sheet 5: Attendance Log (chronological)
+    // Sheet 4: Attendance Log (chronological)
     addSheet(
       workbook,
       'Attendance Log',
@@ -205,7 +177,7 @@ export async function GET() {
         ])
     );
 
-    // Sheet 6: Summary (per student x subject vs minimum requirement)
+    // Sheet 5: Summary (per student x subject vs minimum requirement)
     const summaryRows: (string | number)[][] = [];
     students.forEach((s) => {
       subjects.forEach((sub) => {
