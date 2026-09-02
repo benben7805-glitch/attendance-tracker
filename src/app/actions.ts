@@ -251,7 +251,7 @@ export async function getSubjectAttendanceReport(subjectId: string) {
 export async function getClassesForDate(dateStr: string) {
   const { data, error } = await supabase
     .from('classes')
-    .select('*, subjects(id, name, type)')
+    .select('*, subjects(id, name, type), batches(id, name)')
     .eq('date', dateStr)
     .order('start_time', { ascending: true });
 
@@ -263,7 +263,8 @@ export async function addCustomClass(
   subjectId: string,
   dateStr: string,
   startTime: string,
-  endTime: string
+  endTime: string,
+  batchId?: string
 ) {
   const { data, error } = await supabase
     .from('classes')
@@ -273,6 +274,7 @@ export async function addCustomClass(
         date: dateStr,
         start_time: startTime,
         end_time: endTime,
+        ...(batchId ? { batch_id: batchId } : {}),
       },
     ])
     .select();
@@ -284,6 +286,16 @@ export async function addCustomClass(
     throw new Error(error.message);
   }
   return data;
+}
+
+export async function getBatchMemberRollNumbers(batchId: string) {
+  const { data, error } = await supabase
+    .from('batch_students')
+    .select('student_roll_number')
+    .eq('batch_id', batchId);
+
+  if (error) throw new Error(error.message);
+  return (data || []).map((r) => r.student_roll_number);
 }
 
 export async function deleteClass(classId: string) {
@@ -458,4 +470,153 @@ export async function getStudentReport(rollNumber: string) {
     absentDays,
     fullAttendanceLog,
   };
+}
+
+// ==========================================
+// BATCH ACTIONS
+// ==========================================
+
+export async function getBatches() {
+  const { data, error } = await supabase
+    .from('batches')
+    .select('*, subjects(id, name, type)')
+    .order('created_at', { ascending: false });
+
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function getBatchesForSubject(subjectId: string) {
+  const { data, error } = await supabase
+    .from('batches')
+    .select('*')
+    .eq('subject_id', subjectId)
+    .order('name', { ascending: true });
+
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function addBatch(subjectId: string, name: string) {
+  if (!name.trim()) {
+    throw new Error('Batch name is required.');
+  }
+
+  const { data, error } = await supabase
+    .from('batches')
+    .insert([{ subject_id: subjectId, name: name.trim() }])
+    .select();
+
+  if (error) {
+    if (error.code === '23505') {
+      throw new Error('A batch with this name already exists for this subject.');
+    }
+    throw new Error(error.message);
+  }
+  return data;
+}
+
+export async function deleteBatch(batchId: string) {
+  const { error } = await supabase
+    .from('batches')
+    .delete()
+    .eq('id', batchId);
+
+  if (error) throw new Error(error.message);
+  return { success: true };
+}
+
+export async function getBatchStudents(batchId: string) {
+  const { data, error } = await supabase
+    .from('batch_students')
+    .select('student_roll_number, students(roll_number, name)')
+    .eq('batch_id', batchId);
+
+  if (error) throw new Error(error.message);
+  return (data || []).map((r) => {
+    const student = Array.isArray(r.students) ? r.students[0] : r.students;
+    return {
+      roll_number: student?.roll_number || r.student_roll_number,
+      name: student?.name || 'Unknown',
+    };
+  });
+}
+
+export async function addStudentToBatch(batchId: string, rollNumber: string) {
+  const { error } = await supabase
+    .from('batch_students')
+    .insert([{ batch_id: batchId, student_roll_number: rollNumber.trim() }]);
+
+  if (error) {
+    if (error.code === '23505') {
+      throw new Error('Student is already in this batch.');
+    }
+    throw new Error(error.message);
+  }
+  return { success: true };
+}
+
+export async function addMultipleStudentsToBatch(batchId: string, rollNumbers: string[]) {
+  if (rollNumbers.length === 0) return { success: true };
+
+  const insertData = rollNumbers.map((r) => ({
+    batch_id: batchId,
+    student_roll_number: r.trim(),
+  }));
+
+  const { error } = await supabase
+    .from('batch_students')
+    .upsert(insertData, { onConflict: 'batch_id,student_roll_number' });
+
+  if (error) throw new Error(error.message);
+  return { success: true };
+}
+
+export async function removeStudentFromBatch(batchId: string, rollNumber: string) {
+  const { error } = await supabase
+    .from('batch_students')
+    .delete()
+    .eq('batch_id', batchId)
+    .eq('student_roll_number', rollNumber);
+
+  if (error) throw new Error(error.message);
+  return { success: true };
+}
+
+// ==========================================
+// EVENT ACTIONS
+// ==========================================
+
+export async function getEvents() {
+  const { data, error } = await supabase
+    .from('events')
+    .select('*')
+    .order('date', { ascending: true });
+
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function addEvent(title: string, description: string, date: string) {
+  if (!title.trim()) {
+    throw new Error('Event title is required.');
+  }
+
+  const { data, error } = await supabase
+    .from('events')
+    .insert([{ title: title.trim(), description: description.trim(), date }])
+    .select();
+
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+export async function deleteEvent(eventId: string) {
+  const { error } = await supabase
+    .from('events')
+    .delete()
+    .eq('id', eventId);
+
+  if (error) throw new Error(error.message);
+  return { success: true };
 }

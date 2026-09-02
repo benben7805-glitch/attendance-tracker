@@ -68,7 +68,62 @@ ALTER TABLE classes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance ENABLE ROW LEVEL SECURITY;
 
 -- Create permissive policies for application access (Next.js server-side / client-side)
+-- DROP IF EXISTS makes the script safe to re-run (Supabase has no CREATE POLICY IF NOT EXISTS)
+DROP POLICY IF EXISTS "Allow read/write access for all users" ON students;
 CREATE POLICY "Allow read/write access for all users" ON students FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow read/write access for all users" ON subjects;
 CREATE POLICY "Allow read/write access for all users" ON subjects FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow read/write access for all users" ON classes;
 CREATE POLICY "Allow read/write access for all users" ON classes FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow read/write access for all users" ON attendance;
 CREATE POLICY "Allow read/write access for all users" ON attendance FOR ALL USING (true) WITH CHECK (true);
+
+-- ============================================================================
+-- BATCH MANAGEMENT
+-- ============================================================================
+
+-- 6. Create batches table (optional groupings per subject)
+CREATE TABLE IF NOT EXISTS batches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE NOT NULL,
+    name TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    CONSTRAINT unique_subject_batch_name UNIQUE (subject_id, name)
+);
+
+-- 7. Create batch_students junction table
+CREATE TABLE IF NOT EXISTS batch_students (
+    batch_id UUID REFERENCES batches(id) ON DELETE CASCADE NOT NULL,
+    student_roll_number TEXT REFERENCES students(roll_number) ON DELETE CASCADE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    PRIMARY KEY (batch_id, student_roll_number)
+);
+
+-- 7a. Migration: add batch_id to classes (nullable for backward compatibility)
+ALTER TABLE classes ADD COLUMN IF NOT EXISTS batch_id UUID REFERENCES batches(id) ON DELETE SET NULL;
+
+ALTER TABLE batches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE batch_students ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow read/write access for all users" ON batches;
+CREATE POLICY "Allow read/write access for all users" ON batches FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "Allow read/write access for all users" ON batch_students;
+CREATE POLICY "Allow read/write access for all users" ON batch_students FOR ALL USING (true) WITH CHECK (true);
+
+-- ============================================================================
+-- EVENTS / CALENDAR
+-- ============================================================================
+
+-- 8. Create events table
+CREATE TABLE IF NOT EXISTS events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    title TEXT NOT NULL,
+    description TEXT,
+    date DATE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow read/write access for all users" ON events;
+CREATE POLICY "Allow read/write access for all users" ON events FOR ALL USING (true) WITH CHECK (true);

@@ -15,6 +15,8 @@ const navItems: NavItem[] = [
   { label: 'Daily Manager', href: '/admin', icon: '📅' },
   { label: 'Manage Students', href: '/admin/students', icon: '👨‍🎓' },
   { label: 'Manage Subjects', href: '/admin/subjects', icon: '📚' },
+  { label: 'Batches', href: '/admin/batches', icon: '👥' },
+  { label: 'Events', href: '/admin/events', icon: '📆' },
   { label: 'Backup', href: '/admin/backup', icon: '💾' },
 ];
 

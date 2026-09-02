@@ -9,6 +9,8 @@ import {
   getStudents,
   getClassAttendance,
   saveAttendance,
+  getBatchesForSubject,
+  getBatchMemberRollNumbers,
 } from '@/app/actions';
 import { getSubjectTypeOption, SubjectType } from '@/lib/attendance';
 
@@ -28,11 +30,22 @@ interface ClassItem {
   date: string;
   start_time: string;
   end_time: string;
+  batch_id?: string | null;
   subjects: {
     id: string;
     name: string;
     type?: string;
   };
+  batches?: {
+    id: string;
+    name: string;
+  } | null;
+}
+
+interface BatchItem {
+  id: string;
+  subject_id: string;
+  name: string;
 }
 
 interface AttendanceRecord {
@@ -51,9 +64,11 @@ export default function DailyManagerPage() {
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
+  const [batches, setBatches] = useState<BatchItem[]>([]);
   
   // Custom class form states
   const [selectedSubjectId, setSelectedSubjectId] = useState('');
+  const [selectedBatchId, setSelectedBatchId] = useState('');
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('10:00');
   
@@ -67,6 +82,24 @@ export default function DailyManagerPage() {
   const [activeClassId, setActiveClassId] = useState<string | null>(null);
   const [attendanceMap, setAttendanceMap] = useState<Record<string, 'present' | 'absent'>>({});
   const [attendanceLoading, setAttendanceLoading] = useState(false);
+  const [filteredStudents, setFilteredStudents] = useState<Student[]>([]);
+
+  // Load batches for a given subject
+  const loadBatches = async (subjectId: string) => {
+    try {
+      const data = await getBatchesForSubject(subjectId);
+      setBatches(data as unknown as BatchItem[]);
+      setSelectedBatchId('');
+    } catch {
+      setBatches([]);
+    }
+  };
+
+  const handleSubjectChange = (subjectId: string) => {
+    setSelectedSubjectId(subjectId);
+    setSelectedBatchId('');
+    loadBatches(subjectId);
+  };
 
   // Fetch classes, subjects, and students
   useEffect(() => {
@@ -82,6 +115,7 @@ export default function DailyManagerPage() {
         setStudents(studentsData);
         if (subjectsData.length > 0) {
           setSelectedSubjectId(subjectsData[0].id);
+          loadBatches(subjectsData[0].id);
         }
       } catch (err: any) {
         setError(err.message || 'Failed to load configuration data.');
@@ -124,7 +158,7 @@ export default function DailyManagerPage() {
 
     startTransition(async () => {
       try {
-        await addCustomClass(selectedSubjectId, date, startTime, endTime);
+        await addCustomClass(selectedSubjectId, date, startTime, endTime, selectedBatchId || undefined);
         setSuccessMsg('Class added successfully.');
         const updatedClasses = await getClassesForDate(date);
         setClasses(updatedClasses as unknown as ClassItem[]);
@@ -162,11 +196,21 @@ export default function DailyManagerPage() {
 
     try {
       const existingRecords = await getClassAttendance(classId);
+      const activeClass = classes.find((c) => c.id === classId);
+
+      // Determine the set of students for this class
+      let relevantStudents = students;
+      if (activeClass?.batch_id) {
+        const memberRolls = await getBatchMemberRollNumbers(activeClass.batch_id);
+        const memberSet = new Set(memberRolls);
+        relevantStudents = students.filter((s) => memberSet.has(s.roll_number));
+      }
+
       // Create initial local attendance map: roll_number -> status
       const initialMap: Record<string, 'present' | 'absent'> = {};
       
-      // Default all students to present if no attendance recorded yet
-      students.forEach((s) => {
+      // Default all relevant students to present if no attendance recorded yet
+      relevantStudents.forEach((s) => {
         initialMap[s.roll_number] = 'present';
       });
 
@@ -176,6 +220,7 @@ export default function DailyManagerPage() {
       });
 
       setAttendanceMap(initialMap);
+      setFilteredStudents(relevantStudents);
     } catch (err: any) {
       setError(err.message || 'Failed to load attendance.');
       setActiveClassId(null);
@@ -195,7 +240,7 @@ export default function DailyManagerPage() {
   // Bulk actions
   const markAll = (status: 'present' | 'absent') => {
     const updated = { ...attendanceMap };
-    students.forEach((s) => {
+    filteredStudents.forEach((s) => {
       updated[s.roll_number] = status;
     });
     setAttendanceMap(updated);
@@ -290,6 +335,22 @@ export default function DailyManagerPage() {
                       <div style={classInfoStyle}>
                         <div style={classSubjectRowStyle}>
                           <span style={classSubjectStyle}>{cls.subjects?.name}</span>
+                          {cls.batches?.name && (
+                            <span
+                              style={{
+                                fontSize: '0.72rem',
+                                fontWeight: '600',
+                                padding: '2px 10px',
+                                borderRadius: '999px',
+                                whiteSpace: 'nowrap',
+                                color: '#22d3ee',
+                                background: 'rgba(34, 211, 238, 0.12)',
+                                border: '1px solid rgba(34, 211, 238, 0.35)',
+                              }}
+                            >
+                              👥 {cls.batches.name}
+                            </span>
+                          )}
                           <span
                             style={{
                               ...typeBadgeBaseStyle,
@@ -345,12 +406,35 @@ export default function DailyManagerPage() {
                   <select
                     className="input-field"
                     value={selectedSubjectId}
-                    onChange={(e) => setSelectedSubjectId(e.target.value)}
+                    onChange={(e) => handleSubjectChange(e.target.value)}
                     style={selectStyle}
                   >
                     {subjects.map((sub) => (
                       <option key={sub.id} value={sub.id}>
                         {sub.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div style={formGroupStyle}>
+                <label style={labelStyle}>Batch (optional)</label>
+                {batches.length === 0 ? (
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                    No batches for this subject. Class applies to all students.
+                  </p>
+                ) : (
+                  <select
+                    className="input-field"
+                    value={selectedBatchId}
+                    onChange={(e) => setSelectedBatchId(e.target.value)}
+                    style={selectStyle}
+                  >
+                    <option value="">All students</option>
+                    {batches.map((batch) => (
+                      <option key={batch.id} value={batch.id}>
+                        {batch.name}
                       </option>
                     ))}
                   </select>
@@ -412,7 +496,13 @@ export default function DailyManagerPage() {
                     classes.find((c) => c.id === activeClassId)?.subjects?.type
                   ).label
                 }
-                ) | Time:{' '}
+                )
+                {classes.find((c) => c.id === activeClassId)?.batches?.name && (
+                  <span> | Batch: <strong style={{ color: 'var(--text-primary)' }}>
+                    {classes.find((c) => c.id === activeClassId)?.batches?.name}
+                  </strong></span>
+                )}
+                {' '}| Time:{' '}
                 {classes.find((c) => c.id === activeClassId)?.start_time.substring(0, 5)} -{' '}
                 {classes.find((c) => c.id === activeClassId)?.end_time.substring(0, 5)}
               </p>
@@ -441,17 +531,21 @@ export default function DailyManagerPage() {
             <div className="flex-center" style={{ minHeight: '150px' }}>
               <div className="loader" />
             </div>
-          ) : students.length === 0 ? (
+          ) : filteredStudents.length === 0 ? (
             <div style={emptyStateStyle}>
-              <p>No students registered in the database.</p>
+              <p>
+                {classes.find((c) => c.id === activeClassId)?.batch_id
+                  ? 'No students in this batch.'
+                  : 'No students registered in the database.'}
+              </p>
               <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                Please add students in the "Manage Students" section first.
+                Please add students first.
               </p>
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <div style={attendanceGridStyle}>
-                {students.map((student) => {
+                {filteredStudents.map((student) => {
                   const status = attendanceMap[student.roll_number] || 'present';
                   return (
                     <div key={student.roll_number} style={studentRowStyle}>

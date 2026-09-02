@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { getSession, getStudentReport, logoutAction } from '@/app/actions';
+import { getSession, getStudentReport, logoutAction, getEvents } from '@/app/actions';
 import {
   getSubjectTypeOption,
   getMinAttendance,
@@ -43,8 +43,16 @@ interface StudentReport {
   fullAttendanceLog: LogItem[];
 }
 
+interface EventItem {
+  id: string;
+  title: string;
+  description: string | null;
+  date: string;
+}
+
 export default function StudentDashboard() {
   const [report, setReport] = useState<StudentReport | null>(null);
+  const [events, setEvents] = useState<EventItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -62,8 +70,12 @@ export default function StudentDashboard() {
           return;
         }
 
-        const data = await getStudentReport(session.rollNumber);
+        const [data, eventsData] = await Promise.all([
+          getStudentReport(session.rollNumber),
+          getEvents(),
+        ]);
         setReport(data as unknown as StudentReport);
+        setEvents(eventsData as unknown as EventItem[]);
       } catch (err: any) {
         setError(err.message || 'Failed to load attendance report.');
       } finally {
@@ -124,6 +136,13 @@ export default function StudentDashboard() {
 
   const { student, subjectStats, absentDays } = report;
 
+  const localToday = new Date();
+  const tzOffset = localToday.getTimezoneOffset();
+  const todayLocal = new Date(localToday.getTime() - tzOffset * 60 * 1000).toISOString().split('T')[0];
+  const upcomingEvents = events
+    .filter((ev) => ev.date >= todayLocal)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
   return (
     <div className="container animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
       {/* Header Bar */}
@@ -139,6 +158,36 @@ export default function StudentDashboard() {
           🚪 Sign Out
         </button>
       </header>
+
+      {/* Upcoming Events Section */}
+      {events.length > 0 && (
+        <section className="glass-panel" style={eventsPanelStyle}>
+          <div style={eventsHeaderStyle}>
+            <h2 style={sectionTitleStyle}>📅 Upcoming Events</h2>
+            <span style={eventsCountStyle}>{upcomingEvents.length} upcoming</span>
+          </div>
+          <div style={eventsGridStyle}>
+            {upcomingEvents.slice(0, 6).map((ev) => (
+              <div key={ev.id} style={eventCardStyle}>
+                <div style={eventDateBoxStyle}>
+                  <span style={eventDateDayStyle}>
+                    {new Date(ev.date + 'T00:00:00').toLocaleDateString('en-US', { day: '2-digit' })}
+                  </span>
+                  <span style={eventDateMonthStyle}>
+                    {new Date(ev.date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short' })}
+                  </span>
+                </div>
+                <div style={eventTextStyle}>
+                  <span style={eventTitleStyle}>{ev.title}</span>
+                  {ev.description && (
+                    <span style={eventDescStyle}>{ev.description}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Subject Wise Cards Grid */}
       <section style={sectionContainerStyle}>
@@ -413,6 +462,94 @@ const studentNameStyle: React.CSSProperties = {
 const logoutBtnStyle: React.CSSProperties = {
   padding: '10px 18px',
   fontSize: '0.9rem',
+};
+
+const eventsPanelStyle: React.CSSProperties = {
+  padding: '20px 24px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '16px',
+};
+
+const eventsHeaderStyle: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+};
+
+const eventsCountStyle: React.CSSProperties = {
+  fontSize: '0.85rem',
+  color: 'var(--text-secondary)',
+  background: 'rgba(6, 182, 212, 0.1)',
+  padding: '4px 12px',
+  borderRadius: '999px',
+  border: '1px solid rgba(6, 182, 212, 0.3)',
+};
+
+const eventsGridStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+  gap: '12px',
+};
+
+const eventCardStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '12px',
+  padding: '12px',
+  background: 'rgba(255,255,255,0.02)',
+  border: '1px solid var(--border-color)',
+  borderRadius: '12px',
+};
+
+const eventDateBoxStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: '48px',
+  height: '48px',
+  background: 'rgba(6, 182, 212, 0.1)',
+  border: '1px solid rgba(6, 182, 212, 0.3)',
+  borderRadius: '10px',
+  flexShrink: 0,
+};
+
+const eventDateDayStyle: React.CSSProperties = {
+  fontSize: '1rem',
+  fontWeight: '700',
+  color: '#22d3ee',
+  lineHeight: '1',
+};
+
+const eventDateMonthStyle: React.CSSProperties = {
+  fontSize: '0.65rem',
+  fontWeight: '600',
+  color: 'var(--text-secondary)',
+  textTransform: 'uppercase',
+};
+
+const eventTextStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2px',
+  minWidth: 0,
+};
+
+const eventTitleStyle: React.CSSProperties = {
+  fontWeight: '600',
+  fontSize: '0.95rem',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+};
+
+const eventDescStyle: React.CSSProperties = {
+  fontSize: '0.8rem',
+  color: 'var(--text-secondary)',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
 };
 
 const sectionContainerStyle: React.CSSProperties = {
