@@ -102,6 +102,13 @@ CREATE TABLE IF NOT EXISTS batch_students (
 -- 7a. Migration: add batch_id to classes (nullable for backward compatibility)
 ALTER TABLE classes ADD COLUMN IF NOT EXISTS batch_id UUID REFERENCES batches(id) ON DELETE SET NULL;
 
+-- 7b. Migration: allow the same subject/date/time to have multiple classes for
+-- different batches. The original unique constraint only allowed one class per
+-- subject/date/start_time. It is recreated with batch_id so that two classes can
+-- run at the same time for different batches (batch_id is NULL for "all students").
+ALTER TABLE classes DROP CONSTRAINT IF EXISTS unique_subject_date_time;
+ALTER TABLE classes ADD CONSTRAINT unique_subject_date_time UNIQUE (subject_id, date, start_time, batch_id);
+
 ALTER TABLE batches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE batch_students ENABLE ROW LEVEL SECURITY;
 

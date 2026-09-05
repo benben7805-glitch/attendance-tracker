@@ -17,6 +17,7 @@ import { getSubjectTypeOption, SubjectType } from '@/lib/attendance';
 interface Subject {
   id: string;
   name: string;
+  type?: string;
 }
 
 interface Student {
@@ -411,7 +412,7 @@ export default function DailyManagerPage() {
                   >
                     {subjects.map((sub) => (
                       <option key={sub.id} value={sub.id}>
-                        {sub.name}
+                        {sub.name} ({getSubjectTypeOption(sub.type).label})
                       </option>
                     ))}
                   </select>

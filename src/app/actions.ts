@@ -281,7 +281,7 @@ export async function addCustomClass(
 
   if (error) {
     if (error.code === '23505') {
-      throw new Error('A class for this subject at this time already exists on this day.');
+      throw new Error('A class for this subject and batch at this time already exists on this day.');
     }
     throw new Error(error.message);
   }
