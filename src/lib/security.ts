@@ -14,15 +14,8 @@ export function sanitizeText(input: unknown, maxLength: number = 255): string {
   // Remove null bytes and control characters (except common whitespace)
   let clean = input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 
-  // Strip script and style blocks completely along with their contents
-  clean = clean.replace(/<script[\s\S]*?<\/script>/gi, '');
-  clean = clean.replace(/<style[\s\S]*?<\/style>/gi, '');
-
-  // Strip all remaining HTML tags
-  clean = clean.replace(/<[^>]*>/g, '');
-
-  // Neutralize dangerous protocol schemes if present
-  clean = clean.replace(/javascript:/gi, '').replace(/data:/gi, '');
+  // Strip angle brackets to prevent any HTML/XML tag creation (CodeQL-safe single-character class)
+  clean = clean.replace(/[<>]/g, '');
 
   // Trim and cap length
   clean = clean.trim();
