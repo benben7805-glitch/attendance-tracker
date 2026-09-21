@@ -41,20 +41,32 @@ export default function EventsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const loadEvents = async () => {
-    try {
-      setLoading(true);
-      const data = await getEvents();
-      setEvents(data as unknown as EventItem[]);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load events.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Initial load
   useEffect(() => {
-    loadEvents();
+    let isMounted = true;
+
+    async function fetchEvents() {
+      try {
+        const data = await getEvents();
+        if (isMounted) {
+          setEvents(data as unknown as EventItem[]);
+        }
+      } catch (err: unknown) {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : 'Failed to load events.');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    fetchEvents();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const handleAddEvent = async (e: React.FormEvent) => {
@@ -79,8 +91,8 @@ export default function EventsPage() {
         setNewDescription('');
         const updated = await getEvents();
         setEvents(updated as unknown as EventItem[]);
-      } catch (err: any) {
-        setError(err.message || 'Failed to add event.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to add event.');
       }
     });
   };
@@ -93,9 +105,9 @@ export default function EventsPage() {
       try {
         await deleteEvent(event.id);
         setSuccess('Event deleted.');
-        setEvents(events.filter((ev) => ev.id !== event.id));
-      } catch (err: any) {
-        setError(err.message || 'Failed to delete event.');
+        setEvents((prev) => prev.filter((ev) => ev.id !== event.id));
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to delete event.');
       }
     });
   };

@@ -67,8 +67,8 @@ export default function ManageBatchesPage() {
         if (subjectsData.length > 0) {
           setSelectedSubjectId(subjectsData[0].id);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to load data.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to load data.');
       } finally {
         setLoading(false);
       }
@@ -85,12 +85,13 @@ export default function ManageBatchesPage() {
     setError(null);
     setSuccess(null);
     setSelectedBatch(batch);
+    setSelectedToAdd([]);
     setStudentFilter('');
     try {
       const students = await getBatchStudents(batch.id);
       setBatchStudents(students as unknown as Student[]);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load batch students.');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to load batch students.');
       setBatchStudents([]);
     }
   };
@@ -115,8 +116,8 @@ export default function ManageBatchesPage() {
         setSuccess(`Batch "${newBatchName}" added successfully.`);
         setNewBatchName('');
         await reloadBatches();
-      } catch (err: any) {
-        setError(err.message || 'Failed to add batch.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to add batch.');
       }
     });
   };
@@ -131,18 +132,22 @@ export default function ManageBatchesPage() {
       try {
         await deleteBatch(batch.id);
         setSuccess(`Batch "${batch.name}" deleted.`);
-        setBatches(batches.filter((b) => b.id !== batch.id));
+        setBatches((prev) => prev.filter((b) => b.id !== batch.id));
         if (selectedBatch?.id === batch.id) setSelectedBatch(null);
-      } catch (err: any) {
-        setError(err.message || 'Failed to delete batch.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to delete batch.');
       }
     });
   };
 
   const allStudentsInBatch = new Set(batchStudents.map((s) => s.roll_number));
+  const filterLower = studentFilter.toLowerCase();
   const studentsNotInBatch = allStudents.filter(
-    (s) => !allStudentsInBatch.has(s.roll_number) &&
-      (!studentFilter || s.name.toLowerCase().includes(studentFilter.toLowerCase()))
+    (s) =>
+      !allStudentsInBatch.has(s.roll_number) &&
+      (!studentFilter ||
+        s.name.toLowerCase().includes(filterLower) ||
+        s.roll_number.toLowerCase().includes(filterLower))
   );
 
   const handleAddSelectedStudents = async (rollNumbers: string[]) => {
@@ -154,10 +159,11 @@ export default function ManageBatchesPage() {
         await addMultipleStudentsToBatch(selectedBatch.id, rollNumbers);
         const students = await getBatchStudents(selectedBatch.id);
         setBatchStudents(students as unknown as Student[]);
+        setSelectedToAdd([]);
         setStudentFilter('');
         setSuccess(`${rollNumbers.length} student(s) added to batch.`);
-      } catch (err: any) {
-        setError(err.message || 'Failed to add students.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to add students.');
       }
     });
   };
@@ -172,10 +178,10 @@ export default function ManageBatchesPage() {
     startTransition(async () => {
       try {
         await removeStudentFromBatch(selectedBatch.id, rollNumber);
-        setBatchStudents(batchStudents.filter((s) => s.roll_number !== rollNumber));
+        setBatchStudents((prev) => prev.filter((s) => s.roll_number !== rollNumber));
         setSuccess('Student removed from batch.');
-      } catch (err: any) {
-        setError(err.message || 'Failed to remove student.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to remove student.');
       }
     });
   };

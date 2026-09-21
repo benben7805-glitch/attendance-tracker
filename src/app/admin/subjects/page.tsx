@@ -24,21 +24,32 @@ export default function ManageSubjectsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  // Load subjects
-  const loadSubjectsList = async () => {
-    try {
-      setLoading(true);
-      const data = await getSubjects();
-      setSubjects(data as unknown as Subject[]);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load subjects.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Initial load
   useEffect(() => {
-    loadSubjectsList();
+    let isMounted = true;
+
+    async function fetchSubjects() {
+      try {
+        const data = await getSubjects();
+        if (isMounted) {
+          setSubjects(data as unknown as Subject[]);
+        }
+      } catch (err: unknown) {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : 'Failed to load subjects.');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    fetchSubjects();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // Handle subject creation
@@ -61,8 +72,8 @@ export default function ManageSubjectsPage() {
         // Reload list
         const updatedList = await getSubjects();
         setSubjects(updatedList as unknown as Subject[]);
-      } catch (err: any) {
-        setError(err.message || 'Failed to add subject.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to add subject.');
       }
     });
   };
@@ -79,16 +90,17 @@ export default function ManageSubjectsPage() {
       try {
         await deleteSubject(id);
         setSuccess(`Subject "${name}" deleted successfully.`);
-        setSubjects(subjects.filter((s) => s.id !== id));
-      } catch (err: any) {
-        setError(err.message || 'Failed to delete subject.');
+        setSubjects((prev) => prev.filter((s) => s.id !== id));
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to delete subject.');
       }
     });
   };
 
-  // Filter subjects based on search query
-  const filteredSubjects = subjects.filter((s) =>
-    s.name.toLowerCase().includes(searchQuery.toLowerCase())
+  // Filter subjects based on search query (by name or type)
+  const q = searchQuery.toLowerCase().trim();
+  const filteredSubjects = subjects.filter(
+    (s) => s.name.toLowerCase().includes(q) || s.type.toLowerCase().includes(q)
   );
 
   return (

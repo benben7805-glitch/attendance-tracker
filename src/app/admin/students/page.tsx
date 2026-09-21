@@ -21,21 +21,32 @@ export default function ManageStudentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  // Load students
-  const loadStudentsList = async () => {
-    try {
-      setLoading(true);
-      const data = await getStudents();
-      setStudents(data as unknown as Student[]);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load students.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Initial load
   useEffect(() => {
-    loadStudentsList();
+    let isMounted = true;
+
+    async function fetchStudents() {
+      try {
+        const data = await getStudents();
+        if (isMounted) {
+          setStudents(data as unknown as Student[]);
+        }
+      } catch (err: unknown) {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : 'Failed to load students.');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    fetchStudents();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // Handle student creation
@@ -58,8 +69,8 @@ export default function ManageStudentsPage() {
         // Reload list
         const updatedList = await getStudents();
         setStudents(updatedList as unknown as Student[]);
-      } catch (err: any) {
-        setError(err.message || 'Failed to add student.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to add student.');
       }
     });
   };
@@ -76,9 +87,9 @@ export default function ManageStudentsPage() {
       try {
         await deleteStudent(rollNumber);
         setSuccess(`Student "${name}" deleted successfully.`);
-        setStudents(students.filter((s) => s.roll_number !== rollNumber));
-      } catch (err: any) {
-        setError(err.message || 'Failed to delete student.');
+        setStudents((prev) => prev.filter((s) => s.roll_number !== rollNumber));
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to delete student.');
       }
     });
   };

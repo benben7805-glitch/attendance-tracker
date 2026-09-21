@@ -16,9 +16,10 @@ CREATE TABLE IF NOT EXISTS students (
 -- 2. Create subjects table
 CREATE TABLE IF NOT EXISTS subjects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'theory' CHECK (type IN ('theory', 'practical', 'clinics')),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    CONSTRAINT unique_subject_name_type UNIQUE (name, type)
 );
 
 -- 2a. Migration for existing databases: add the "type" column to subjects
@@ -29,6 +30,12 @@ CHECK (type IN ('theory', 'practical', 'clinics'));
 -- 2b. Migration for existing databases: remove the weekly_schedule table
 -- (the weekly schedule feature has been removed from the app)
 DROP TABLE IF EXISTS weekly_schedule;
+
+-- 2c. Migration for existing databases: allow subjects with the same name if they have different types
+-- (e.g. "ENT" Theory vs "ENT" Practical vs "ENT" Clinics)
+ALTER TABLE subjects DROP CONSTRAINT IF EXISTS subjects_name_key;
+ALTER TABLE subjects DROP CONSTRAINT IF EXISTS unique_subject_name_type;
+ALTER TABLE subjects ADD CONSTRAINT unique_subject_name_type UNIQUE (name, type);
 
 -- 3. Create classes table (actual class instances held on specific dates)
 CREATE TABLE IF NOT EXISTS classes (
@@ -103,11 +110,32 @@ CREATE TABLE IF NOT EXISTS batch_students (
 ALTER TABLE classes ADD COLUMN IF NOT EXISTS batch_id UUID REFERENCES batches(id) ON DELETE SET NULL;
 
 -- 7b. Migration: allow the same subject/date/time to have multiple classes for
--- different batches. The original unique constraint only allowed one class per
--- subject/date/start_time. It is recreated with batch_id so that two classes can
--- run at the same time for different batches (batch_id is NULL for "all students").
+-- different batches. In PostgreSQL, standard UNIQUE constraints treat NULL as distinct,
+-- which allows duplicate classes when batch_id IS NULL. We replace it with dual partial
+-- unique indexes to strictly enforce uniqueness for both NULL and non-NULL batch_id.
 ALTER TABLE classes DROP CONSTRAINT IF EXISTS unique_subject_date_time;
-ALTER TABLE classes ADD CONSTRAINT unique_subject_date_time UNIQUE (subject_id, date, start_time, batch_id);
+DROP INDEX IF EXISTS unique_class_all_students;
+CREATE UNIQUE INDEX IF NOT EXISTS unique_class_all_students 
+ON classes (subject_id, date, start_time) WHERE batch_id IS NULL;
+
+DROP INDEX IF EXISTS unique_class_with_batch;
+CREATE UNIQUE INDEX IF NOT EXISTS unique_class_with_batch 
+ON classes (subject_id, date, start_time, batch_id) WHERE batch_id IS NOT NULL;
+
+-- 7c. Ensure valid class time intervals
+ALTER TABLE classes DROP CONSTRAINT IF EXISTS check_class_times;
+ALTER TABLE classes ADD CONSTRAINT check_class_times CHECK (start_time < end_time);
+
+-- 7d. Performance & Foreign Key Indexes
+CREATE INDEX IF NOT EXISTS idx_classes_subject_id ON classes(subject_id);
+CREATE INDEX IF NOT EXISTS idx_classes_date ON classes(date);
+CREATE INDEX IF NOT EXISTS idx_classes_subject_date ON classes(subject_id, date);
+CREATE INDEX IF NOT EXISTS idx_classes_batch_id ON classes(batch_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_class_id ON attendance(class_id);
+CREATE INDEX IF NOT EXISTS idx_attendance_student_roll ON attendance(student_roll_number);
+CREATE INDEX IF NOT EXISTS idx_batches_subject_id ON batches(subject_id);
+CREATE INDEX IF NOT EXISTS idx_batch_students_batch_id ON batch_students(batch_id);
+CREATE INDEX IF NOT EXISTS idx_batch_students_roll ON batch_students(student_roll_number);
 
 ALTER TABLE batches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE batch_students ENABLE ROW LEVEL SECURITY;
@@ -130,7 +158,10 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_events_date ON events(date);
+
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow read/write access for all users" ON events;
 CREATE POLICY "Allow read/write access for all users" ON events FOR ALL USING (true) WITH CHECK (true);
+

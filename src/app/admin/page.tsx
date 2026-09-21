@@ -49,10 +49,6 @@ interface BatchItem {
   name: string;
 }
 
-interface AttendanceRecord {
-  student_roll_number: string;
-  status: 'present' | 'absent';
-}
 
 export default function DailyManagerPage() {
   const [date, setDate] = useState(() => {
@@ -118,8 +114,8 @@ export default function DailyManagerPage() {
           setSelectedSubjectId(subjectsData[0].id);
           loadBatches(subjectsData[0].id);
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to load configuration data.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to load configuration data.');
       } finally {
         setLoading(false);
       }
@@ -137,8 +133,8 @@ export default function DailyManagerPage() {
         setClasses(classesData as unknown as ClassItem[]);
         // Reset attendance view if active class date changed
         setActiveClassId(null);
-      } catch (err: any) {
-        setError(err.message || 'Failed to load classes for selected date.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to load classes for selected date.');
       } finally {
         setLoading(false);
       }
@@ -163,8 +159,8 @@ export default function DailyManagerPage() {
         setSuccessMsg('Class added successfully.');
         const updatedClasses = await getClassesForDate(date);
         setClasses(updatedClasses as unknown as ClassItem[]);
-      } catch (err: any) {
-        setError(err.message || 'Failed to add class.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to add class.');
       }
     });
   };
@@ -182,8 +178,8 @@ export default function DailyManagerPage() {
         setClasses(classes.filter((c) => c.id !== classId));
         if (activeClassId === classId) setActiveClassId(null);
         setSuccessMsg('Class deleted successfully.');
-      } catch (err: any) {
-        setError(err.message || 'Failed to delete class.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to delete class.');
       }
     });
   };
@@ -222,8 +218,8 @@ export default function DailyManagerPage() {
 
       setAttendanceMap(initialMap);
       setFilteredStudents(relevantStudents);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load attendance.');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to load attendance.');
       setActiveClassId(null);
     } finally {
       setAttendanceLoading(false);
@@ -263,8 +259,8 @@ export default function DailyManagerPage() {
         await saveAttendance(activeClassId, records);
         setSuccessMsg('Attendance saved successfully.');
         setActiveClassId(null); // Close panel
-      } catch (err: any) {
-        setError(err.message || 'Failed to save attendance.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to save attendance.');
       }
     });
   };

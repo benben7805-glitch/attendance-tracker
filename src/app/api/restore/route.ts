@@ -1,12 +1,14 @@
-import { cookies } from 'next/headers';
 import ExcelJS from 'exceljs';
 import { supabase } from '@/lib/supabase';
+import { getSession } from '@/app/actions';
+import { verifyOrigin } from '@/lib/security';
 import { normalizeSubjectType } from '@/lib/attendance';
 
 // ==========================================
 // Restore endpoint: uploads an Excel backup
-// produced by /api/backup and replaces the
-// database contents with the data in it.
+// produced by /api/backup and restores all
+// data: students, subjects, batches, batch_students,
+// classes, attendance, and events.
 // ==========================================
 
 const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
@@ -22,8 +24,20 @@ interface ParsedSubject {
   type: string;
 }
 
+interface ParsedBatch {
+  name: string;
+  subject: string;
+}
+
+interface ParsedBatchStudent {
+  batchName: string;
+  subject: string;
+  rollNumber: string;
+}
+
 interface ParsedClassRow {
   subject: string;
+  batchName?: string;
   date: string;
   startTime: string;
   endTime: string;
@@ -31,17 +45,23 @@ interface ParsedClassRow {
 
 interface ParsedAttendanceRow {
   subject: string;
+  batchName?: string;
   date: string;
   startTime: string;
   rollNumber: string;
   status: 'present' | 'absent';
 }
 
+interface ParsedEvent {
+  title: string;
+  date: string;
+  description: string;
+}
+
 type Row = Record<string, unknown>;
 
 // ---------- Cell helpers ----------
 
-/** If the cell holds a formula, return its cached result instead. */
 function unwrapFormula(raw: ExcelJS.CellValue): ExcelJS.CellValue {
   if (
     typeof raw === 'object' &&
@@ -58,7 +78,11 @@ function unwrapFormula(raw: ExcelJS.CellValue): ExcelJS.CellValue {
 function textOfCell(raw: ExcelJS.CellValue): string {
   const value = unwrapFormula(raw);
   if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'string') {
+    // Strip formula-escaping single quote if present
+    const trimmed = value.trim();
+    return trimmed.startsWith("'") ? trimmed.substring(1) : trimmed;
+  }
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   if (value instanceof Date) return value.toISOString().substring(0, 10);
   if ('richText' in value && Array.isArray(value.richText)) {
@@ -74,7 +98,6 @@ function pad2(n: number): string {
   return n.toString().padStart(2, '0');
 }
 
-/** Normalize a cell into a YYYY-MM-DD date string (null if empty/unparseable). */
 function dateOfCell(raw: ExcelJS.CellValue): string | null {
   const value = unwrapFormula(raw);
   if (value === null || value === undefined || value === '') return null;
@@ -83,7 +106,6 @@ function dateOfCell(raw: ExcelJS.CellValue): string | null {
     return isNaN(value.getTime()) ? null : value.toISOString().substring(0, 10);
   }
   if (typeof value === 'number') {
-    // Excel serial date: days since 1899-12-30 (= 25569 days before Unix epoch)
     const d = new Date(Math.round((value - 25569) * 86400 * 1000));
     return isNaN(d.getTime()) ? null : d.toISOString().substring(0, 10);
   }
@@ -91,17 +113,14 @@ function dateOfCell(raw: ExcelJS.CellValue): string | null {
   const s = textOfCell(raw);
   if (!s) return null;
 
-  // ISO-ish: 2026-08-24 (optionally followed by a time part)
   const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (isoMatch) {
     return `${isoMatch[1]}-${pad2(Number(isoMatch[2]))}-${pad2(Number(isoMatch[3]))}`;
   }
-  // DD/MM/YYYY, DD.MM.YYYY or DD-MM-YYYY
   const dmyMatch = s.match(/^(\d{1,2})[/.,](\d{1,2})[/.,](\d{4})$/);
   if (dmyMatch) {
     return `${dmyMatch[3]}-${pad2(Number(dmyMatch[2]))}-${pad2(Number(dmyMatch[1]))}`;
   }
-  // Generic JS Date parse fallback
   const parsed = new Date(s);
   if (!isNaN(parsed.getTime())) {
     return parsed.toISOString().substring(0, 10);
@@ -109,7 +128,6 @@ function dateOfCell(raw: ExcelJS.CellValue): string | null {
   return null;
 }
 
-/** Normalize a cell into an HH:MM time string (null if empty/unparseable). */
 function timeOfCell(raw: ExcelJS.CellValue): string | null {
   const value = unwrapFormula(raw);
   if (value === null || value === undefined || value === '') return null;
@@ -118,7 +136,6 @@ function timeOfCell(raw: ExcelJS.CellValue): string | null {
     return `${pad2(value.getUTCHours())}:${pad2(value.getUTCMinutes())}`;
   }
   if (typeof value === 'number') {
-    // Fraction of a day
     let frac = value % 1;
     if (frac < 0) frac += 1;
     const totalSeconds = Math.round(frac * 86400);
@@ -165,11 +182,6 @@ function buildColumnMap(sheet: ExcelJS.Worksheet): SheetColumns {
   return map;
 }
 
-/**
- * Reads every data row of a sheet using the given header keys, parses each row
- * with `parse`, and appends valid results to `parsed`. Invalid/empty rows must
- * be handled inside `parse` (e.g. collecting warnings).
- */
 function readRows<T>(
   sheet: ExcelJS.Worksheet | null | undefined,
   columns: SheetColumns,
@@ -210,9 +222,15 @@ async function insertChunked(table: string, rows: Row[], select: string): Promis
 // ==========================================
 
 export async function POST(request: Request) {
-  const cookieStore = await cookies();
-  if (cookieStore.get('auth_role')?.value !== 'admin') {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  // CSRF verification
+  if (!verifyOrigin(request)) {
+    return Response.json({ error: 'Forbidden: Cross-site request rejected.' }, { status: 403 });
+  }
+
+  // Admin authentication check
+  const session = await getSession();
+  if (session.role !== 'admin') {
+    return Response.json({ error: 'Unauthorized: Admin access required.' }, { status: 401 });
   }
 
   try {
@@ -232,21 +250,24 @@ export async function POST(request: Request) {
       );
     } catch {
       return Response.json(
-        { error: 'Could not read the file. Please upload the original .xlsx backup.' },
+        { error: 'Could not read the file. Please upload a valid .xlsx backup.' },
         { status: 400 }
       );
     }
 
     const studentsSheet = workbook.getWorksheet('Students');
     const subjectsSheet = workbook.getWorksheet('Subjects');
+    const batchesSheet = workbook.getWorksheet('Batches');
+    const batchStudentsSheet = workbook.getWorksheet('Batch Students');
     const classesSheet = workbook.getWorksheet('Classes');
     const attendanceSheet = workbook.getWorksheet('Attendance Log');
+    const eventsSheet = workbook.getWorksheet('Events');
 
     if (!studentsSheet && !subjectsSheet && !classesSheet && !attendanceSheet) {
       return Response.json(
         {
           error:
-            'This file does not look like an Attendance Hub backup (no Students / Subjects / Classes / Attendance Log worksheets found).',
+            'This file does not look like an Attendance Hub backup (no Students, Subjects, Classes, or Attendance Log sheets found).',
         },
         { status: 400 }
       );
@@ -257,9 +278,6 @@ export async function POST(request: Request) {
     // ---------- Parse Students ----------
     const parsedStudents: ParsedStudent[] = [];
     const studentCols = studentsSheet ? buildColumnMap(studentsSheet) : {};
-    if (studentsSheet && !studentCols['rollnumber']) {
-      warnings.push('Students sheet has no "Roll Number" column — it was skipped.');
-    }
     readRows<ParsedStudent>(
       studentsSheet,
       studentCols,
@@ -269,9 +287,7 @@ export async function POST(request: Request) {
         const name = textOfCell(cells[1]);
         if (!rollNumber && !name) return null;
         if (!rollNumber || !name) {
-          warnings.push(
-            `Students row ${rowNumber}: missing ${!rollNumber ? 'Roll Number' : 'Name'} — skipped.`
-          );
+          warnings.push(`Students row ${rowNumber}: missing Roll Number or Name — skipped.`);
           return null;
         }
         return { rollNumber, name };
@@ -282,9 +298,6 @@ export async function POST(request: Request) {
     // ---------- Parse Subjects ----------
     const parsedSubjects: ParsedSubject[] = [];
     const subjectCols = subjectsSheet ? buildColumnMap(subjectsSheet) : {};
-    if (subjectsSheet && !subjectCols['name']) {
-      warnings.push('Subjects sheet has no "Name" column — it was skipped.');
-    }
     readRows<ParsedSubject>(
       subjectsSheet,
       subjectCols,
@@ -298,29 +311,59 @@ export async function POST(request: Request) {
       parsedSubjects
     );
 
+    // ---------- Parse Batches ----------
+    const parsedBatches: ParsedBatch[] = [];
+    const batchCols = batchesSheet ? buildColumnMap(batchesSheet) : {};
+    readRows<ParsedBatch>(
+      batchesSheet,
+      batchCols,
+      ['batchname', 'subject'],
+      (cells) => {
+        const name = textOfCell(cells[0]);
+        const subject = textOfCell(cells[1]);
+        if (!name || !subject) return null;
+        return { name, subject };
+      },
+      parsedBatches
+    );
+
+    // ---------- Parse Batch Students ----------
+    const parsedBatchStudents: ParsedBatchStudent[] = [];
+    const batchStudentCols = batchStudentsSheet ? buildColumnMap(batchStudentsSheet) : {};
+    readRows<ParsedBatchStudent>(
+      batchStudentsSheet,
+      batchStudentCols,
+      ['batchname', 'subject', 'rollnumber'],
+      (cells) => {
+        const batchName = textOfCell(cells[0]);
+        const subject = textOfCell(cells[1]);
+        const rollNumber = textOfCell(cells[2]);
+        if (!batchName || !subject || !rollNumber) return null;
+        return { batchName, subject, rollNumber };
+      },
+      parsedBatchStudents
+    );
+
     // ---------- Parse Classes ----------
     const parsedClasses: ParsedClassRow[] = [];
     const classesCols = classesSheet ? buildColumnMap(classesSheet) : {};
-    if (classesSheet && (!classesCols['subject'] || !classesCols['date'])) {
-      warnings.push('Classes sheet is missing "Subject" or "Date" columns — it was skipped.');
-    }
     readRows<ParsedClassRow>(
       classesSheet,
       classesCols,
-      ['date', 'day', 'subject', 'starttime', 'endtime'],
+      ['date', 'day', 'subject', 'batch', 'starttime', 'endtime'],
       (cells, rowNumber) => {
         const date = dateOfCell(cells[0]);
         const subject = textOfCell(cells[2]);
-        const startTime = timeOfCell(cells[3]);
-        const endTime = timeOfCell(cells[4]);
+        const batchRaw = textOfCell(cells[3]);
+        const batchName = batchRaw && batchRaw.toLowerCase() !== 'all students' ? batchRaw : undefined;
+        const startTime = timeOfCell(cells[4]);
+        const endTime = timeOfCell(cells[5]);
         if (!subject && !date && !startTime) return null;
         if (!subject || !date || !startTime || !endTime) {
-          warnings.push(
-            `Classes row ${rowNumber}: incomplete (needs Subject, Date, Start Time, End Time) — skipped.`
-          );
+          warnings.push(`Classes row ${rowNumber}: incomplete data — skipped.`);
           return null;
         }
-        return { subject, date, startTime, endTime };
+        return { subject, batchName, date, startTime, endTime };
       },
       parsedClasses
     );
@@ -328,29 +371,43 @@ export async function POST(request: Request) {
     // ---------- Parse Attendance Log ----------
     const parsedAttendance: ParsedAttendanceRow[] = [];
     const attendanceCols = attendanceSheet ? buildColumnMap(attendanceSheet) : {};
-    if (attendanceSheet && (!attendanceCols['rollnumber'] || !attendanceCols['status'])) {
-      warnings.push(
-        'Attendance Log sheet is missing "Roll Number" or "Status" columns — it was skipped.'
-      );
-    }
     readRows<ParsedAttendanceRow>(
       attendanceSheet,
       attendanceCols,
-      ['date', 'starttime', 'subject', 'rollnumber', 'studentname', 'status'],
+      ['date', 'starttime', 'subject', 'batch', 'rollnumber', 'studentname', 'status'],
       (cells, rowNumber) => {
         const date = dateOfCell(cells[0]);
         const startTime = timeOfCell(cells[1]);
         const subject = textOfCell(cells[2]);
-        const rollNumber = textOfCell(cells[3]);
-        const status = statusOfCell(cells[5]);
+        const batchRaw = textOfCell(cells[3]);
+        const batchName = batchRaw && batchRaw.toLowerCase() !== 'all students' ? batchRaw : undefined;
+        const rollNumber = textOfCell(cells[4]);
+        const status = statusOfCell(cells[6]);
         if (!subject && !rollNumber && !date) return null;
         if (!subject || !date || !startTime || !rollNumber || !status) {
-          warnings.push(`Attendance Log row ${rowNumber}: incomplete record — skipped.`);
+          warnings.push(`Attendance row ${rowNumber}: incomplete record — skipped.`);
           return null;
         }
-        return { subject, date, startTime, rollNumber, status };
+        return { subject, batchName, date, startTime, rollNumber, status };
       },
       parsedAttendance
+    );
+
+    // ---------- Parse Events ----------
+    const parsedEvents: ParsedEvent[] = [];
+    const eventCols = eventsSheet ? buildColumnMap(eventsSheet) : {};
+    readRows<ParsedEvent>(
+      eventsSheet,
+      eventCols,
+      ['title', 'date', 'description'],
+      (cells) => {
+        const title = textOfCell(cells[0]);
+        const date = dateOfCell(cells[1]);
+        const description = textOfCell(cells[2]);
+        if (!title || !date) return null;
+        return { title, date, description };
+      },
+      parsedEvents
     );
 
     if (
@@ -379,10 +436,13 @@ export async function POST(request: Request) {
       return seenSubjectNames.has(key) ? false : (seenSubjectNames.add(key), true);
     });
 
-    // ---------- Wipe existing data (children first for FK safety) ----------
+    // ---------- Wipe existing data in strict child-first order ----------
     const wipeOrder: { table: string; column: string }[] = [
       { table: 'attendance', column: 'id' },
+      { table: 'batch_students', column: 'batch_id' },
       { table: 'classes', column: 'id' },
+      { table: 'batches', column: 'id' },
+      { table: 'events', column: 'id' },
       { table: 'subjects', column: 'id' },
       { table: 'students', column: 'roll_number' },
     ];
@@ -405,126 +465,178 @@ export async function POST(request: Request) {
     const insertedSubjects = await insertChunked(
       'subjects',
       subjectRows.map((s) => ({ name: s.name, type: s.type })),
-      'id, name'
+      'id, name, type'
     );
     insertedSubjects.forEach((row) => {
-      subjectIdByName.set(String(row.name).toLowerCase(), String(row.id));
+      subjectIdByName.set(`${String(row.name).toLowerCase()}|${String(row.type || 'theory').toLowerCase()}`, String(row.id));
+      if (!subjectIdByName.has(String(row.name).toLowerCase())) {
+        subjectIdByName.set(String(row.name).toLowerCase(), String(row.id));
+      }
     });
 
-    // Classes/attendance may reference subjects missing from the Subjects sheet
-    if (parsedClasses.length > 0 || parsedAttendance.length > 0) {
-      const referencedNames = new Set<string>();
-      parsedClasses.forEach((c) => referencedNames.add(c.subject.toLowerCase()));
-      parsedAttendance.forEach((a) => referencedNames.add(a.subject.toLowerCase()));
-      const missingSubjects = [...referencedNames].filter((n) => !subjectIdByName.has(n));
-      if (missingSubjects.length > 0) {
-        const insertedMissing = await insertChunked(
-          'subjects',
-          missingSubjects.map((name) => ({ name, type: 'theory' })),
-          'id, name'
-        );
-        insertedMissing.forEach((row) => {
-          subjectIdByName.set(String(row.name).toLowerCase(), String(row.id));
-        });
-        warnings.push(
-          `Some subjects referenced by classes were missing from the Subjects sheet and were re-created as "Theory": ${missingSubjects.join(', ')}.`
-        );
-      }
+    // Re-create missing subjects referenced by classes or attendance
+    const referencedSubjectNames = new Set<string>();
+    parsedClasses.forEach((c) => referencedSubjectNames.add(c.subject.toLowerCase()));
+    parsedAttendance.forEach((a) => referencedSubjectNames.add(a.subject.toLowerCase()));
+    parsedBatches.forEach((b) => referencedSubjectNames.add(b.subject.toLowerCase()));
+    const missingSubjects = [...referencedSubjectNames].filter((n) => !subjectIdByName.has(n));
+    if (missingSubjects.length > 0) {
+      const insertedMissing = await insertChunked(
+        'subjects',
+        missingSubjects.map((name) => ({ name, type: 'theory' })),
+        'id, name'
+      );
+      insertedMissing.forEach((row) => {
+        subjectIdByName.set(String(row.name).toLowerCase(), String(row.id));
+      });
+      warnings.push(
+        `Some subjects were missing from the Subjects sheet and were re-created as "Theory": ${missingSubjects.join(', ')}.`
+      );
+    }
+
+    // ---------- Restore Batches ----------
+    const batchIdByKey = new Map<string, string>(); // "subject_id|batch_name" -> batch_id
+    const batchRowsToInsert: Row[] = [];
+    const seenBatchKeys = new Set<string>();
+
+    for (const b of parsedBatches) {
+      const subId = subjectIdByName.get(b.subject.toLowerCase());
+      if (!subId) continue;
+      const key = `${subId}|${b.name.toLowerCase()}`;
+      if (seenBatchKeys.has(key)) continue;
+      seenBatchKeys.add(key);
+      batchRowsToInsert.push({ subject_id: subId, name: b.name });
+    }
+
+    if (batchRowsToInsert.length > 0) {
+      const insertedBatches = await insertChunked(
+        'batches',
+        batchRowsToInsert,
+        'id, subject_id, name'
+      );
+      insertedBatches.forEach((b) => {
+        batchIdByKey.set(`${b.subject_id}|${String(b.name).toLowerCase()}`, String(b.id));
+      });
+    }
+
+    // ---------- Restore Batch Students ----------
+    const knownRolls = new Set(studentRows.map((s) => s.rollNumber));
+    const batchStudentRowsToInsert: Row[] = [];
+    const seenBatchStudentKeys = new Set<string>();
+
+    for (const bs of parsedBatchStudents) {
+      if (!knownRolls.has(bs.rollNumber)) continue;
+      const subId = subjectIdByName.get(bs.subject.toLowerCase());
+      if (!subId) continue;
+      const batchId = batchIdByKey.get(`${subId}|${bs.batchName.toLowerCase()}`);
+      if (!batchId) continue;
+
+      const key = `${batchId}|${bs.rollNumber}`;
+      if (seenBatchStudentKeys.has(key)) continue;
+      seenBatchStudentKeys.add(key);
+      batchStudentRowsToInsert.push({ batch_id: batchId, student_roll_number: bs.rollNumber });
+    }
+
+    if (batchStudentRowsToInsert.length > 0) {
+      await insertChunked('batch_students', batchStudentRowsToInsert, 'batch_id, student_roll_number');
     }
 
     // ---------- Restore Classes ----------
     const seenClassKeys = new Set<string>();
     const classRows: Row[] = [];
-    const unknownClassSubjects = new Set<string>();
     for (const c of parsedClasses) {
       const subjectId = subjectIdByName.get(c.subject.toLowerCase());
-      if (!subjectId) {
-        unknownClassSubjects.add(c.subject);
-        continue;
+      if (!subjectId) continue;
+
+      let batchId: string | undefined;
+      if (c.batchName) {
+        batchId = batchIdByKey.get(`${subjectId}|${c.batchName.toLowerCase()}`);
       }
-      const key = `${subjectId}|${c.date}|${c.startTime}`;
+
+      const key = `${subjectId}|${c.date}|${c.startTime}|${batchId || 'null'}`;
       if (seenClassKeys.has(key)) continue;
       seenClassKeys.add(key);
+
       classRows.push({
         subject_id: subjectId,
         date: c.date,
         start_time: c.startTime,
         end_time: c.endTime,
+        ...(batchId ? { batch_id: batchId } : {}),
       });
-    }
-    if (unknownClassSubjects.size > 0) {
-      warnings.push(
-        `Some classes reference subjects that could not be resolved: ${[...unknownClassSubjects].join(', ')}.`
-      );
     }
 
     const classKeyToId = new Map<string, string>();
     const insertedClasses = await insertChunked(
       'classes',
       classRows,
-      'id, subject_id, date, start_time'
+      'id, subject_id, date, start_time, batch_id'
     );
     insertedClasses.forEach((row) => {
+      const bId = row.batch_id ? String(row.batch_id) : 'null';
       const key = `${row.subject_id}|${String(row.date).substring(0, 10)}|${String(
         row.start_time
-      ).substring(0, 5)}`;
+      ).substring(0, 5)}|${bId}`;
       classKeyToId.set(key, String(row.id));
     });
 
     // ---------- Restore Attendance ----------
     const seenAttendanceKeys = new Set<string>();
     const attendanceRows: Row[] = [];
-    const knownRolls = new Set(studentRows.map((s) => s.rollNumber));
-    const missingClassKeys = new Set<string>();
-    const unknownAttendanceRolls = new Set<string>();
     for (const a of parsedAttendance) {
-      if (!knownRolls.has(a.rollNumber)) {
-        unknownAttendanceRolls.add(a.rollNumber);
-        continue;
-      }
+      if (!knownRolls.has(a.rollNumber)) continue;
       const subjectId = subjectIdByName.get(a.subject.toLowerCase());
-      if (!subjectId) {
-        missingClassKeys.add(`${a.subject} on ${a.date} ${a.startTime}`);
-        continue;
+      if (!subjectId) continue;
+
+      let batchId: string | undefined;
+      if (a.batchName) {
+        batchId = batchIdByKey.get(`${subjectId}|${a.batchName.toLowerCase()}`);
       }
-      const classId = classKeyToId.get(`${subjectId}|${a.date}|${a.startTime}`);
-      if (!classId) {
-        missingClassKeys.add(`${a.subject} on ${a.date} ${a.startTime}`);
-        continue;
+
+      // First try matching class with batch, fallback to non-batch class
+      let classId = classKeyToId.get(`${subjectId}|${a.date}|${a.startTime}|${batchId || 'null'}`);
+      if (!classId && batchId) {
+        classId = classKeyToId.get(`${subjectId}|${a.date}|${a.startTime}|null`);
       }
+      if (!classId) continue;
+
       const key = `${classId}|${a.rollNumber}`;
       if (seenAttendanceKeys.has(key)) continue;
       seenAttendanceKeys.add(key);
+
       attendanceRows.push({
         class_id: classId,
         student_roll_number: a.rollNumber,
         status: a.status,
       });
     }
-    if (missingClassKeys.size > 0) {
-      warnings.push(
-        `Some attendance records had no matching class row in the backup: ${[...missingClassKeys]
-          .slice(0, 10)
-          .join('; ')}${missingClassKeys.size > 10 ? '; …' : ''}.`
-      );
-    }
-    if (unknownAttendanceRolls.size > 0) {
-      warnings.push(
-        `Some attendance records reference roll numbers not present in the Students sheet: ${[
-          ...unknownAttendanceRolls,
-        ].join(', ')}.`
-      );
+
+    if (attendanceRows.length > 0) {
+      await insertChunked('attendance', attendanceRows, 'id');
     }
 
-    await insertChunked('attendance', attendanceRows, 'id');
+    // ---------- Restore Events ----------
+    if (parsedEvents.length > 0) {
+      await insertChunked(
+        'events',
+        parsedEvents.map((ev) => ({
+          title: ev.title,
+          date: ev.date,
+          description: ev.description || null,
+        })),
+        'id'
+      );
+    }
 
     return Response.json({
       success: true,
       counts: {
         students: studentRows.length,
         subjects: subjectIdByName.size,
+        batches: batchIdByKey.size,
         classes: classRows.length,
         attendance: attendanceRows.length,
+        events: parsedEvents.length,
       },
       warnings,
     });

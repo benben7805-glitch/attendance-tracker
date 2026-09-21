@@ -6,24 +6,30 @@ import { useRouter } from 'next/navigation';
 const includedItems = [
   { icon: '👨‍🎓', label: 'Students', detail: 'Roll numbers & names' },
   { icon: '📚', label: 'Subjects', detail: 'Names & types (Theory / Practical / Clinics)' },
-  { icon: '📅', label: 'Classes', detail: 'Every class held, with date & time' },
+  { icon: '👥', label: 'Batches', detail: 'Batch groupings & student assignments' },
+  { icon: '📅', label: 'Classes', detail: 'Every class held, with date, time & batch' },
   { icon: '📝', label: 'Attendance Log', detail: 'Present/Absent for every student & class' },
+  { icon: '📆', label: 'Events', detail: 'Calendar & academic events' },
   { icon: '📊', label: 'Summary', detail: 'Per-student-per-subject % vs. the minimum requirement' },
 ];
 
 const restorableItems = [
   { icon: '👨‍🎓', label: 'Students', detail: 'From the "Students" sheet' },
   { icon: '📚', label: 'Subjects', detail: 'From the "Subjects" sheet (incl. type)' },
-  { icon: '📅', label: 'Classes', detail: 'From the "Classes" sheet' },
+  { icon: '👥', label: 'Batches', detail: 'From "Batches" & "Batch Students" sheets' },
+  { icon: '📅', label: 'Classes', detail: 'From the "Classes" sheet (with batches)' },
   { icon: '📝', label: 'Attendance Log', detail: 'From the "Attendance Log" sheet' },
+  { icon: '📆', label: 'Events', detail: 'From the "Events" sheet' },
 ];
 
 interface RestoreResult {
   counts: {
     students: number;
     subjects: number;
+    batches?: number;
     classes: number;
     attendance: number;
+    events?: number;
   };
   warnings: string[];
 }
@@ -41,10 +47,13 @@ export default function BackupPage() {
   const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
 
   const handleDownload = () => {
-    // Navigate to the route handler; Content-Disposition triggers the download
     setIsDownloading(true);
-    window.location.href = '/api/backup';
-    // Reset in case navigation is blocked; harmless otherwise
+    const link = document.createElement('a');
+    link.href = '/api/backup';
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
     setTimeout(() => setIsDownloading(false), 4000);
   };
 

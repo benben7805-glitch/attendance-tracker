@@ -28,8 +28,8 @@ export default function LoginPage() {
         } else {
           setError(result.error || 'Authentication failed.');
         }
-      } catch (err: any) {
-        setError(err.message || 'An unexpected error occurred.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'An unexpected error occurred.');
       }
     });
   };

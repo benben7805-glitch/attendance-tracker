@@ -76,8 +76,8 @@ export default function StudentDashboard() {
         ]);
         setReport(data as unknown as StudentReport);
         setEvents(eventsData as unknown as EventItem[]);
-      } catch (err: any) {
-        setError(err.message || 'Failed to load attendance report.');
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to load attendance report.');
       } finally {
         setLoading(false);
       }

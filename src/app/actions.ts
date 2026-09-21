@@ -3,46 +3,106 @@
 import { cookies } from 'next/headers';
 import { supabase } from '@/lib/supabase';
 import { normalizeSubjectType } from '@/lib/attendance';
+import {
+  signSession,
+  verifySession,
+  timingSafeEqual,
+  SESSION_COOKIE_NAME,
+  SESSION_TTL_SECONDS,
+} from '@/lib/auth';
+import { sanitizeRollNumber, sanitizeText } from '@/lib/security';
+import { checkRateLimit } from '@/lib/rate-limit';
+
+// ==========================================
+// SESSION & AUTHORIZATION HELPERS
+// ==========================================
+
+export async function getSession() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
+
+  if (token) {
+    const verified = await verifySession(token);
+    if (verified) {
+      return { role: verified.role, rollNumber: verified.rollNumber || null };
+    }
+  }
+
+  return { role: null, rollNumber: null };
+}
+
+export async function assertAdmin() {
+  const session = await getSession();
+  if (session.role !== 'admin') {
+    throw new Error('Unauthorized: Administrative privileges are required.');
+  }
+  return session;
+}
+
+export async function assertAuthenticated() {
+  const session = await getSession();
+  if (!session.role) {
+    throw new Error('Unauthorized: Authentication required.');
+  }
+  return session;
+}
 
 // ==========================================
 // AUTH ACTIONS
 // ==========================================
 
 export async function loginAction(input: string) {
+  const trimmed = (input || '').trim();
+
+  // Rate limiting to prevent brute-force attacks
+  const rateLimitResult = checkRateLimit(`login:${trimmed.slice(0, 30)}`, 10, 60 * 1000);
+  if (!rateLimitResult.allowed) {
+    return {
+      success: false,
+      error: 'Too many login attempts. Please wait a minute and try again.',
+    };
+  }
+
   const pin = process.env.ADMIN_PIN || '1234';
 
-  // Check admin PIN
-  if (input.trim() === pin) {
+  // Check admin PIN with constant-time equality
+  if (timingSafeEqual(trimmed, pin)) {
+    const sessionToken = await signSession({ role: 'admin' });
     const cookieStore = await cookies();
-    cookieStore.set('auth_role', 'admin', {
+    cookieStore.set(SESSION_COOKIE_NAME, sessionToken, {
       path: '/',
       httpOnly: true,
+      sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 60 * 60 * 24 * 7, // 1 week
+      maxAge: SESSION_TTL_SECONDS,
     });
     return { success: true, redirect: '/admin' };
   }
 
   // Check if roll number exists in students table
-  const { data: student, error } = await supabase
+  const cleanRoll = sanitizeRollNumber(trimmed);
+  if (!cleanRoll) {
+    return { success: false, error: 'Invalid Roll Number or Admin PIN.' };
+  }
+
+  const { data: student } = await supabase
     .from('students')
     .select('roll_number, name')
-    .eq('roll_number', input.trim())
+    .eq('roll_number', cleanRoll)
     .single();
 
   if (student) {
-    const cookieStore = await cookies();
-    cookieStore.set('auth_role', 'student', {
-      path: '/',
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 60 * 60 * 24 * 7,
+    const sessionToken = await signSession({
+      role: 'student',
+      rollNumber: student.roll_number,
     });
-    cookieStore.set('auth_roll_number', student.roll_number, {
+    const cookieStore = await cookies();
+    cookieStore.set(SESSION_COOKIE_NAME, sessionToken, {
       path: '/',
       httpOnly: true,
+      sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 60 * 60 * 24 * 7,
+      maxAge: SESSION_TTL_SECONDS,
     });
     return { success: true, redirect: '/student', name: student.name };
   }
@@ -52,16 +112,8 @@ export async function loginAction(input: string) {
 
 export async function logoutAction() {
   const cookieStore = await cookies();
-  cookieStore.delete('auth_role');
-  cookieStore.delete('auth_roll_number');
+  cookieStore.delete(SESSION_COOKIE_NAME);
   return { success: true };
-}
-
-export async function getSession() {
-  const cookieStore = await cookies();
-  const role = cookieStore.get('auth_role')?.value || null;
-  const rollNumber = cookieStore.get('auth_roll_number')?.value || null;
-  return { role, rollNumber };
 }
 
 // ==========================================
@@ -69,6 +121,8 @@ export async function getSession() {
 // ==========================================
 
 export async function getStudents() {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('students')
     .select('*')
@@ -79,13 +133,18 @@ export async function getStudents() {
 }
 
 export async function addStudent(rollNumber: string, name: string) {
-  if (!rollNumber.trim() || !name.trim()) {
-    throw new Error('Roll Number and Name are required.');
+  await assertAdmin();
+
+  const cleanRoll = sanitizeRollNumber(rollNumber);
+  const cleanName = sanitizeText(name, 100);
+
+  if (!cleanRoll || !cleanName) {
+    throw new Error('Valid Roll Number and Name are required.');
   }
 
   const { data, error } = await supabase
     .from('students')
-    .insert([{ roll_number: rollNumber.trim(), name: name.trim() }])
+    .insert([{ roll_number: cleanRoll, name: cleanName }])
     .select();
 
   if (error) {
@@ -98,10 +157,13 @@ export async function addStudent(rollNumber: string, name: string) {
 }
 
 export async function deleteStudent(rollNumber: string) {
+  await assertAdmin();
+
+  const cleanRoll = sanitizeRollNumber(rollNumber);
   const { error } = await supabase
     .from('students')
     .delete()
-    .eq('roll_number', rollNumber);
+    .eq('roll_number', cleanRoll);
 
   if (error) throw new Error(error.message);
   return { success: true };
@@ -112,6 +174,8 @@ export async function deleteStudent(rollNumber: string) {
 // ==========================================
 
 export async function getSubjects() {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('subjects')
     .select('*')
@@ -122,18 +186,21 @@ export async function getSubjects() {
 }
 
 export async function addSubject(name: string, type: string) {
-  if (!name.trim()) {
+  await assertAdmin();
+
+  const cleanName = sanitizeText(name, 100);
+  if (!cleanName) {
     throw new Error('Subject Name is required.');
   }
 
   const { data, error } = await supabase
     .from('subjects')
-    .insert([{ name: name.trim(), type: normalizeSubjectType(type) }])
+    .insert([{ name: cleanName, type: normalizeSubjectType(type) }])
     .select();
 
   if (error) {
     if (error.code === '23505') {
-      throw new Error('Subject with this name already exists.');
+      throw new Error('Subject with this name and type already exists.');
     }
     if (error.code === 'PGRST204') {
       throw new Error(
@@ -146,6 +213,8 @@ export async function addSubject(name: string, type: string) {
 }
 
 export async function deleteSubject(id: string) {
+  await assertAdmin();
+
   const { error } = await supabase
     .from('subjects')
     .delete()
@@ -156,6 +225,8 @@ export async function deleteSubject(id: string) {
 }
 
 export async function getSubjectAttendanceReport(subjectId: string) {
+  await assertAuthenticated();
+
   // 1. Get the subject
   const { data: subject, error: subjectError } = await supabase
     .from('subjects')
@@ -185,17 +256,33 @@ export async function getSubjectAttendanceReport(subjectId: string) {
 
   if (classesError) throw new Error(classesError.message);
 
-  // 4. Get attendance records for those classes
-  let attendanceRecords: { class_id: string; student_roll_number: string; status: string }[] = [];
+  // 4. Get attendance records for those classes with pagination to prevent 1000-row PostgREST truncation
+  const attendanceRecords: { class_id: string; student_roll_number: string; status: string }[] = [];
   if (classes && classes.length > 0) {
     const classIds = classes.map((c) => c.id);
-    const { data, error } = await supabase
-      .from('attendance')
-      .select('class_id, student_roll_number, status')
-      .in('class_id', classIds);
+    const PAGE_SIZE = 1000;
+    let from = 0;
+    let hasMore = true;
 
-    if (error) throw new Error(error.message);
-    attendanceRecords = data || [];
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('attendance')
+        .select('class_id, student_roll_number, status')
+        .in('class_id', classIds)
+        .range(from, from + PAGE_SIZE - 1);
+
+      if (error) throw new Error(error.message);
+      if (data && data.length > 0) {
+        attendanceRecords.push(...data);
+        if (data.length < PAGE_SIZE) {
+          hasMore = false;
+        } else {
+          from += PAGE_SIZE;
+        }
+      } else {
+        hasMore = false;
+      }
+    }
   }
 
   // Per-student tally: rollNumber -> { attended, absent }
@@ -249,6 +336,8 @@ export async function getSubjectAttendanceReport(subjectId: string) {
 // ==========================================
 
 export async function getClassesForDate(dateStr: string) {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('classes')
     .select('*, subjects(id, name, type), batches(id, name)')
@@ -266,22 +355,34 @@ export async function addCustomClass(
   endTime: string,
   batchId?: string
 ) {
+  await assertAdmin();
+
+  if (!startTime || !endTime) {
+    throw new Error('Start time and End time are required.');
+  }
+  if (startTime >= endTime) {
+    throw new Error('Start time must be earlier than End time.');
+  }
+
+  const insertPayload = {
+    subject_id: subjectId,
+    date: dateStr,
+    start_time: startTime,
+    end_time: endTime,
+    ...(batchId ? { batch_id: batchId } : {}),
+  };
+
   const { data, error } = await supabase
     .from('classes')
-    .insert([
-      {
-        subject_id: subjectId,
-        date: dateStr,
-        start_time: startTime,
-        end_time: endTime,
-        ...(batchId ? { batch_id: batchId } : {}),
-      },
-    ])
+    .insert([insertPayload])
     .select();
 
   if (error) {
     if (error.code === '23505') {
       throw new Error('A class for this subject and batch at this time already exists on this day.');
+    }
+    if (error.code === '23514') {
+      throw new Error('Start time must be strictly earlier than end time.');
     }
     throw new Error(error.message);
   }
@@ -289,6 +390,8 @@ export async function addCustomClass(
 }
 
 export async function getBatchMemberRollNumbers(batchId: string) {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('batch_students')
     .select('student_roll_number')
@@ -299,6 +402,8 @@ export async function getBatchMemberRollNumbers(batchId: string) {
 }
 
 export async function deleteClass(classId: string) {
+  await assertAdmin();
+
   const { error } = await supabase
     .from('classes')
     .delete()
@@ -313,6 +418,8 @@ export async function deleteClass(classId: string) {
 // ==========================================
 
 export async function getClassAttendance(classId: string) {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('attendance')
     .select('*')
@@ -326,22 +433,28 @@ export async function saveAttendance(
   classId: string,
   records: { student_roll_number: string; status: 'present' | 'absent' }[]
 ) {
+  await assertAdmin();
+
   if (records.length === 0) return { success: true };
 
-  // Prepare upsert records
   const upsertData = records.map((r) => ({
     class_id: classId,
-    student_roll_number: r.student_roll_number,
-    status: r.status,
+    student_roll_number: sanitizeRollNumber(r.student_roll_number),
+    status: r.status === 'absent' ? 'absent' : 'present',
   }));
 
-  const { data, error } = await supabase
-    .from('attendance')
-    .upsert(upsertData, { onConflict: 'class_id,student_roll_number' })
-    .select();
+  // Chunk upserts in batches of 500 to avoid payload size/timeout limits
+  const CHUNK_SIZE = 500;
+  for (let i = 0; i < upsertData.length; i += CHUNK_SIZE) {
+    const chunk = upsertData.slice(i, i + CHUNK_SIZE);
+    const { error } = await supabase
+      .from('attendance')
+      .upsert(chunk, { onConflict: 'class_id,student_roll_number' });
 
-  if (error) throw new Error(error.message);
-  return { success: true, data };
+    if (error) throw new Error(error.message);
+  }
+
+  return { success: true };
 }
 
 // ==========================================
@@ -349,11 +462,20 @@ export async function saveAttendance(
 // ==========================================
 
 export async function getStudentReport(rollNumber: string) {
+  const session = await assertAuthenticated();
+
+  const cleanRoll = sanitizeRollNumber(rollNumber);
+
+  // IDOR Defense: Students can only query their own report; Admins can query any student
+  if (session.role === 'student' && session.rollNumber !== cleanRoll) {
+    throw new Error('Unauthorized: You can only view your own attendance report.');
+  }
+
   // 1. Get student info
   const { data: student, error: studentError } = await supabase
     .from('students')
     .select('*')
-    .eq('roll_number', rollNumber)
+    .eq('roll_number', cleanRoll)
     .single();
 
   if (studentError || !student) {
@@ -377,17 +499,35 @@ export async function getStudentReport(rollNumber: string) {
 
   if (classesError) throw new Error(classesError.message);
 
-  // 4. Fetch this student's attendance records
-  const { data: attendanceRecords, error: attendanceError } = await supabase
-    .from('attendance')
-    .select('*')
-    .eq('student_roll_number', rollNumber);
+  // 4. Fetch this student's attendance records with range pagination to avoid truncation
+  const attendanceRecords: { class_id: string; status: string }[] = [];
+  const PAGE_SIZE = 1000;
+  let from = 0;
+  let hasMore = true;
 
-  if (attendanceError) throw new Error(attendanceError.message);
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from('attendance')
+      .select('class_id, status')
+      .eq('student_roll_number', cleanRoll)
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) throw new Error(error.message);
+    if (data && data.length > 0) {
+      attendanceRecords.push(...data);
+      if (data.length < PAGE_SIZE) {
+        hasMore = false;
+      } else {
+        from += PAGE_SIZE;
+      }
+    } else {
+      hasMore = false;
+    }
+  }
 
   // Create lookup dictionary for attendance: classId -> status
   const attendanceMap = new Map<string, 'present' | 'absent'>();
-  attendanceRecords?.forEach((rec) => {
+  attendanceRecords.forEach((rec) => {
     attendanceMap.set(rec.class_id, rec.status as 'present' | 'absent');
   });
 
@@ -424,17 +564,9 @@ export async function getStudentReport(rollNumber: string) {
     const subId = cls.subject_id;
     const stats = subjectStatsMap.get(subId);
 
-    // Format time: HH:MM
     const timeFormatted = `${cls.start_time.substring(0, 5)} - ${cls.end_time.substring(0, 5)}`;
 
     if (stats) {
-      // We only count classes that have been marked or if they are in the past
-      // For absolute correctness, a class counts towards total if the student has been marked present or absent.
-      // If unmarked, we could assume they were unmarked (or absent), but standard practice is:
-      // A class counts in the percentage calculation if there's an attendance record for this student in it.
-      // Let's count all classes that have at least one attendance entry in the DB, OR if this student specifically has a record.
-      // Let's count a class if it is present in the student's attendance map (marked present or absent)
-      // Or we can count all classes that have occurred. Let's count classes that have been marked.
       if (status !== 'unmarked') {
         stats.totalClasses += 1;
         if (status === 'present') {
@@ -477,6 +609,8 @@ export async function getStudentReport(rollNumber: string) {
 // ==========================================
 
 export async function getBatches() {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('batches')
     .select('*, subjects(id, name, type)')
@@ -487,6 +621,8 @@ export async function getBatches() {
 }
 
 export async function getBatchesForSubject(subjectId: string) {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('batches')
     .select('*')
@@ -498,13 +634,16 @@ export async function getBatchesForSubject(subjectId: string) {
 }
 
 export async function addBatch(subjectId: string, name: string) {
-  if (!name.trim()) {
+  await assertAdmin();
+
+  const cleanName = sanitizeText(name, 100);
+  if (!cleanName) {
     throw new Error('Batch name is required.');
   }
 
   const { data, error } = await supabase
     .from('batches')
-    .insert([{ subject_id: subjectId, name: name.trim() }])
+    .insert([{ subject_id: subjectId, name: cleanName }])
     .select();
 
   if (error) {
@@ -517,6 +656,8 @@ export async function addBatch(subjectId: string, name: string) {
 }
 
 export async function deleteBatch(batchId: string) {
+  await assertAdmin();
+
   const { error } = await supabase
     .from('batches')
     .delete()
@@ -527,6 +668,8 @@ export async function deleteBatch(batchId: string) {
 }
 
 export async function getBatchStudents(batchId: string) {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('batch_students')
     .select('student_roll_number, students(roll_number, name)')
@@ -543,9 +686,12 @@ export async function getBatchStudents(batchId: string) {
 }
 
 export async function addStudentToBatch(batchId: string, rollNumber: string) {
+  await assertAdmin();
+
+  const cleanRoll = sanitizeRollNumber(rollNumber);
   const { error } = await supabase
     .from('batch_students')
-    .insert([{ batch_id: batchId, student_roll_number: rollNumber.trim() }]);
+    .insert([{ batch_id: batchId, student_roll_number: cleanRoll }]);
 
   if (error) {
     if (error.code === '23505') {
@@ -557,12 +703,17 @@ export async function addStudentToBatch(batchId: string, rollNumber: string) {
 }
 
 export async function addMultipleStudentsToBatch(batchId: string, rollNumbers: string[]) {
+  await assertAdmin();
+
   if (rollNumbers.length === 0) return { success: true };
 
-  const insertData = rollNumbers.map((r) => ({
-    batch_id: batchId,
-    student_roll_number: r.trim(),
-  }));
+  const insertData = rollNumbers
+    .map((r) => sanitizeRollNumber(r))
+    .filter(Boolean)
+    .map((r) => ({
+      batch_id: batchId,
+      student_roll_number: r,
+    }));
 
   const { error } = await supabase
     .from('batch_students')
@@ -573,11 +724,14 @@ export async function addMultipleStudentsToBatch(batchId: string, rollNumbers: s
 }
 
 export async function removeStudentFromBatch(batchId: string, rollNumber: string) {
+  await assertAdmin();
+
+  const cleanRoll = sanitizeRollNumber(rollNumber);
   const { error } = await supabase
     .from('batch_students')
     .delete()
     .eq('batch_id', batchId)
-    .eq('student_roll_number', rollNumber);
+    .eq('student_roll_number', cleanRoll);
 
   if (error) throw new Error(error.message);
   return { success: true };
@@ -588,6 +742,8 @@ export async function removeStudentFromBatch(batchId: string, rollNumber: string
 // ==========================================
 
 export async function getEvents() {
+  await assertAuthenticated();
+
   const { data, error } = await supabase
     .from('events')
     .select('*')
@@ -598,13 +754,18 @@ export async function getEvents() {
 }
 
 export async function addEvent(title: string, description: string, date: string) {
-  if (!title.trim()) {
+  await assertAdmin();
+
+  const cleanTitle = sanitizeText(title, 150);
+  const cleanDesc = sanitizeText(description, 500);
+
+  if (!cleanTitle) {
     throw new Error('Event title is required.');
   }
 
   const { data, error } = await supabase
     .from('events')
-    .insert([{ title: title.trim(), description: description.trim(), date }])
+    .insert([{ title: cleanTitle, description: cleanDesc || null, date }])
     .select();
 
   if (error) throw new Error(error.message);
@@ -612,6 +773,8 @@ export async function addEvent(title: string, description: string, date: string)
 }
 
 export async function deleteEvent(eventId: string) {
+  await assertAdmin();
+
   const { error } = await supabase
     .from('events')
     .delete()
