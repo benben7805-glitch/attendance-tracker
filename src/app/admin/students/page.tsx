@@ -1,16 +1,20 @@
 'use client';
 
 import { useState, useEffect, useTransition } from 'react';
-import { getStudents, addStudent, deleteStudent } from '@/app/actions';
+import { getStudents, addStudent, deleteStudent, getSession } from '@/app/actions';
 
 interface Student {
   roll_number: string;
   name: string;
   created_at: string;
+  student_id?: string;
+  classroom_code?: string;
+  classroom_name?: string;
 }
 
 export default function ManageStudentsPage() {
   const [students, setStudents] = useState<Student[]>([]);
+  const [classroomCode, setClassroomCode] = useState<string>('');
   const [newRollNumber, setNewRollNumber] = useState('');
   const [newName, setNewName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -27,9 +31,10 @@ export default function ManageStudentsPage() {
 
     async function fetchStudents() {
       try {
-        const data = await getStudents();
+        const [data, sess] = await Promise.all([getStudents(), getSession()]);
         if (isMounted) {
           setStudents(data as unknown as Student[]);
+          setClassroomCode(sess.classroomCode || '');
         }
       } catch (err: unknown) {
         if (isMounted) {
@@ -98,7 +103,8 @@ export default function ManageStudentsPage() {
   const filteredStudents = students.filter(
     (s) =>
       s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.roll_number.toLowerCase().includes(searchQuery.toLowerCase())
+      s.roll_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (s.student_id && s.student_id.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
   return (
@@ -129,15 +135,48 @@ export default function ManageStudentsPage() {
           <form onSubmit={handleAddStudent} style={formStyle}>
             <div style={formGroupStyle}>
               <label style={labelStyle}>Roll Number</label>
-              <input
-                type="text"
-                className="input-field"
-                placeholder="e.g. CS202601"
-                value={newRollNumber}
-                onChange={(e) => setNewRollNumber(e.target.value)}
-                disabled={isPending}
-                required
-              />
+              <div style={{ display: 'flex', alignItems: 'stretch' }}>
+                {classroomCode && (
+                  <span
+                    style={{
+                      padding: '10px 14px',
+                      background: 'rgba(139, 92, 246, 0.15)',
+                      border: '1px solid var(--border-color)',
+                      borderRight: 'none',
+                      borderRadius: '8px 0 0 8px',
+                      color: '#c4b5fd',
+                      fontWeight: '700',
+                      fontFamily: 'monospace',
+                      fontSize: '0.9rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                    }}
+                    title="Classroom Code Prefix"
+                  >
+                    {classroomCode}
+                  </span>
+                )}
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="e.g. 1 or 12"
+                  value={newRollNumber}
+                  onChange={(e) => setNewRollNumber(e.target.value)}
+                  disabled={isPending}
+                  required
+                  style={{
+                    borderRadius: classroomCode ? '0 8px 8px 0' : '8px',
+                    width: '100%',
+                  }}
+                />
+              </div>
+              {newRollNumber.trim() && (
+                <p style={{ margin: '6px 0 0 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  Student Login ID will be: <strong style={{ color: 'var(--accent-primary)', fontFamily: 'monospace' }}>
+                    {classroomCode}{newRollNumber.trim().toUpperCase()}
+                  </strong>
+                </p>
+              )}
             </div>
             <div style={formGroupStyle}>
               <label style={labelStyle}>Full Name</label>
@@ -169,7 +208,7 @@ export default function ManageStudentsPage() {
             <input
               type="text"
               className="input-field"
-              placeholder="🔍 Search name or roll number..."
+              placeholder="🔍 Search name, roll, or ID..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               style={searchStyle}
@@ -192,31 +231,55 @@ export default function ManageStudentsPage() {
               <table style={tableStyle}>
                 <thead>
                   <tr style={tableHeaderRowStyle}>
-                    <th style={{ ...thStyle, width: '35%' }}>Roll Number</th>
-                    <th style={{ ...thStyle, width: '45%' }}>Name</th>
-                    <th style={{ ...thStyle, width: '20%', textAlign: 'center' }}>Actions</th>
+                    <th style={{ ...thStyle, width: '32%' }}>Student Login ID</th>
+                    <th style={{ ...thStyle, width: '20%' }}>Roll No</th>
+                    <th style={{ ...thStyle, width: '34%' }}>Name</th>
+                    <th style={{ ...thStyle, width: '14%', textAlign: 'center' }}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredStudents.map((student) => (
-                    <tr key={student.roll_number} style={trStyle} className="table-row">
-                      <td style={tdStyle}>
-                        <code style={codeStyle}>{student.roll_number}</code>
-                      </td>
-                      <td style={{ ...tdStyle, fontWeight: '500' }}>{student.name}</td>
-                      <td style={{ ...tdStyle, textAlign: 'center' }}>
-                        <button
-                          onClick={() => handleDeleteStudent(student.roll_number, student.name)}
-                          className="btn btn-icon"
-                          title="Delete Student"
-                          disabled={isPending}
-                          style={{ color: 'var(--danger)' }}
-                        >
-                          🗑️
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredStudents.map((student) => {
+                    const fullId = student.student_id || `${classroomCode}${student.roll_number}`;
+                    return (
+                      <tr key={student.roll_number} style={trStyle} className="table-row">
+                        <td style={tdStyle}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <code style={{ ...codeStyle, color: '#c4b5fd', fontWeight: '700' }}>
+                              {fullId}
+                            </code>
+                            <button
+                              type="button"
+                              className="btn btn-icon"
+                              style={{ fontSize: '0.8rem', padding: '2px 4px', cursor: 'pointer' }}
+                              title="Copy Student Login ID"
+                              onClick={() => {
+                                navigator.clipboard.writeText(fullId);
+                                setSuccess(`Copied ID "${fullId}" to clipboard!`);
+                                setTimeout(() => setSuccess(null), 3000);
+                              }}
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </td>
+                        <td style={tdStyle}>
+                          <code style={codeStyle}>{student.roll_number}</code>
+                        </td>
+                        <td style={{ ...tdStyle, fontWeight: '500' }}>{student.name}</td>
+                        <td style={{ ...tdStyle, textAlign: 'center' }}>
+                          <button
+                            onClick={() => handleDeleteStudent(student.roll_number, student.name)}
+                            className="btn btn-icon"
+                            title="Delete Student"
+                            disabled={isPending}
+                            style={{ color: 'var(--danger)' }}
+                          >
+                            🗑️
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

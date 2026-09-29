@@ -74,6 +74,43 @@ function sanitizeRollNumber(input) {
     .substring(0, 50);
 }
 
+function parseStudentCompositeId(input, activeClassroomCodes = []) {
+  if (typeof input !== 'string') {
+    return { isPrefixed: false, rollNumber: '', cleanInput: '' };
+  }
+
+  const clean = input.trim().toUpperCase().replace(/[\s/]+/g, '-');
+  if (!clean) {
+    return { isPrefixed: false, rollNumber: '', cleanInput: '' };
+  }
+
+  const sortedCodes = [...activeClassroomCodes]
+    .map((c) => (typeof c === 'string' ? c.trim().toUpperCase() : ''))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+
+  for (const code of sortedCodes) {
+    if (clean.startsWith(code)) {
+      let remainder = clean.substring(code.length);
+      remainder = remainder.replace(/^[-_:]+/, '');
+      if (remainder.length > 0) {
+        return {
+          isPrefixed: true,
+          classroomCode: code,
+          rollNumber: remainder,
+          cleanInput: clean,
+        };
+      }
+    }
+  }
+
+  return {
+    isPrefixed: false,
+    rollNumber: clean.replace(/^[-_:]+/, ''),
+    cleanInput: clean,
+  };
+}
+
 function sanitizeFormula(input) {
   if (input === null || input === undefined) return '';
   const text = String(input);
@@ -226,6 +263,21 @@ await asyncTest('Sign and successfully verify valid student session', async () =
   assert.ok(verified !== null);
   assert.equal(verified.role, 'student');
   assert.equal(verified.rollNumber, 'CS2026-001');
+});
+
+await asyncTest('Sign and successfully verify valid super_admin session with active classroom context', async () => {
+  const token = await signSessionTest({
+    role: 'super_admin',
+    activeAdminId: 'a0000000-0000-0000-0000-000000000001',
+    classroomName: 'Main Classroom',
+    classroomCode: 'MAIN',
+  });
+  const verified = await verifySessionTest(token);
+  assert.ok(verified !== null);
+  assert.equal(verified.role, 'super_admin');
+  assert.equal(verified.activeAdminId, 'a0000000-0000-0000-0000-000000000001');
+  assert.equal(verified.classroomName, 'Main Classroom');
+  assert.equal(verified.classroomCode, 'MAIN');
 });
 
 await asyncTest('Reject tampered payload (elevation of privilege attack)', async () => {
@@ -488,9 +540,13 @@ test('supabase_schema.sql defines dual partial unique indexes and time constrain
 
   // Verify subject name & type composite unique constraint
   assert.ok(
-    sql.includes('unique_subject_name_type UNIQUE (name, type)'),
-    'Schema must enforce unique (name, type) on subjects'
+    sql.includes('unique_admin_subject_name_type') || sql.includes('unique_subject_name_type'),
+    'Schema must enforce unique subjects per classroom'
   );
+
+  // Verify enterprise multi-classroom tables
+  assert.ok(sql.includes('CREATE TABLE IF NOT EXISTS admins'), 'Schema must define admins table');
+  assert.ok(sql.includes('CREATE TABLE IF NOT EXISTS audit_logs'), 'Schema must define audit_logs table');
 
   // Verify indexes on foreign keys
   assert.ok(sql.includes('idx_classes_subject_date'), 'Missing idx_classes_subject_date');
@@ -500,6 +556,51 @@ test('supabase_schema.sql defines dual partial unique indexes and time constrain
   assert.ok(sql.includes('idx_batch_students_batch'), 'Missing idx_batch_students_batch');
   assert.ok(sql.includes('idx_batch_students_roll'), 'Missing idx_batch_students_roll');
   assert.ok(sql.includes('idx_events_date'), 'Missing idx_events_date');
+});
+
+console.log('\n--- 10. Student Composite ID Parsing (e.g. MBBS20261) ---');
+test('Extract classroom code and roll number from composite Student ID (MBBS20261)', () => {
+  const activeCodes = ['MBBS2026', 'MAIN', 'CS101'];
+  const res = parseStudentCompositeId('MBBS20261', activeCodes);
+  assert.equal(res.isPrefixed, true);
+  assert.equal(res.classroomCode, 'MBBS2026');
+  assert.equal(res.rollNumber, '1');
+});
+
+test('Handle multi-digit roll numbers (MBBS202612)', () => {
+  const activeCodes = ['MBBS2026', 'MAIN'];
+  const res = parseStudentCompositeId('MBBS202612', activeCodes);
+  assert.equal(res.isPrefixed, true);
+  assert.equal(res.classroomCode, 'MBBS2026');
+  assert.equal(res.rollNumber, '12');
+});
+
+test('Case-insensitivity and optional delimiters (mbbs2026-05, CS101/42)', () => {
+  const activeCodes = ['MBBS2026', 'CS101'];
+  const res1 = parseStudentCompositeId('mbbs2026-05', activeCodes);
+  assert.equal(res1.isPrefixed, true);
+  assert.equal(res1.classroomCode, 'MBBS2026');
+  assert.equal(res1.rollNumber, '05');
+
+  const res2 = parseStudentCompositeId('cs101/42', activeCodes);
+  assert.equal(res2.isPrefixed, true);
+  assert.equal(res2.classroomCode, 'CS101');
+  assert.equal(res2.rollNumber, '42');
+});
+
+test('Greedy prefix matching (MBBS2026 vs MBBS)', () => {
+  const activeCodes = ['MBBS', 'MBBS2026'];
+  const res = parseStudentCompositeId('MBBS20269', activeCodes);
+  assert.equal(res.isPrefixed, true);
+  assert.equal(res.classroomCode, 'MBBS2026');
+  assert.equal(res.rollNumber, '9');
+});
+
+test('Reject un-prefixed roll number as non-prefixed', () => {
+  const activeCodes = ['MBBS2026', 'MAIN'];
+  const res = parseStudentCompositeId('1', activeCodes);
+  assert.equal(res.isPrefixed, false);
+  assert.equal(res.rollNumber, '1');
 });
 
 console.log('\n====================================================');

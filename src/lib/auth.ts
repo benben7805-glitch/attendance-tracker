@@ -4,7 +4,11 @@
  */
 
 export interface SessionPayload {
-  role: 'admin' | 'student';
+  role: 'super_admin' | 'admin' | 'student';
+  adminId?: string;
+  classroomName?: string;
+  classroomCode?: string;
+  activeAdminId?: string; // For Super Admin active classroom context switching
   rollNumber?: string;
   iat: number;
   exp: number;

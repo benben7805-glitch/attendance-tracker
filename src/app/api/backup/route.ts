@@ -44,44 +44,9 @@ function addSheet(
   return ws;
 }
 
-export async function GET(request: Request) {
-  // CSRF verification
-  if (!verifyOrigin(request)) {
-    return new Response('Forbidden: Cross-site request rejected.', { status: 403 });
-  }
-
-  // Admin session authentication
-  const session = await getSession();
-  if (session.role !== 'admin') {
-    return new Response('Unauthorized: Admin access required.', { status: 401 });
-  }
-
-  try {
-    // 1. Fetch Students, Subjects, Batches, Events
-    const [studentsRes, subjectsRes, batchesRes, batchStudentsRes, eventsRes] = await Promise.all([
-      supabase.from('students').select('*').order('name', { ascending: true }),
-      supabase.from('subjects').select('*').order('name', { ascending: true }),
-      supabase.from('batches').select('*, subjects(id, name, type)').order('name', { ascending: true }),
-      supabase.from('batch_students').select('*, batches(id, name, subject_id)'),
-      supabase.from('events').select('*').order('date', { ascending: true }),
-    ]);
-
-    const initialError =
-      studentsRes.error ||
-      subjectsRes.error ||
-      batchesRes.error ||
-      batchStudentsRes.error ||
-      eventsRes.error;
-    if (initialError) throw new Error(initialError.message);
-
-    const students = studentsRes.data || [];
-    const subjects = subjectsRes.data || [];
-    const batches = batchesRes.data || [];
-    const batchStudents = batchStudentsRes.data || [];
-    const events = eventsRes.data || [];
-
 interface BackupClass {
   id: string;
+  admin_id?: string;
   subject_id: string;
   batch_id?: string | null;
   date: string;
@@ -99,20 +64,94 @@ interface BackupAttendance {
   marked_at?: string;
 }
 
-    // 2. Fetch Classes with range pagination
+export async function GET(request: Request) {
+  // CSRF verification
+  if (!verifyOrigin(request)) {
+    return new Response('Forbidden: Cross-site request rejected.', { status: 403 });
+  }
+
+  // Admin or Super Admin session authentication
+  const session = await getSession();
+  if (session.role !== 'admin' && session.role !== 'super_admin') {
+    return new Response('Unauthorized: Admin access required.', { status: 401 });
+  }
+
+  const { searchParams } = new URL(request.url);
+  const targetClassroomId = searchParams.get('classroom_id');
+  const exportAll = searchParams.get('all') === 'true' && session.role === 'super_admin';
+
+  let effectiveAdminId: string | null = null;
+  if (session.role === 'admin') {
+    effectiveAdminId = session.adminId;
+  } else if (session.role === 'super_admin') {
+    if (targetClassroomId) {
+      effectiveAdminId = targetClassroomId;
+    } else if (!exportAll && session.activeAdminId) {
+      effectiveAdminId = session.activeAdminId;
+    }
+  }
+
+  try {
+    // 1. Build queries based on scoping
+    let studentsQ = supabase.from('students').select('*').order('name', { ascending: true });
+    let subjectsQ = supabase.from('subjects').select('*').order('name', { ascending: true });
+    let batchesQ = supabase.from('batches').select('*, subjects(id, name, type)').order('name', { ascending: true });
+    const batchStudentsQ = supabase.from('batch_students').select('*, batches(id, name, subject_id, admin_id)');
+    let eventsQ = supabase.from('events').select('*').order('date', { ascending: true });
+
+    if (effectiveAdminId) {
+      studentsQ = studentsQ.eq('admin_id', effectiveAdminId);
+      subjectsQ = subjectsQ.eq('admin_id', effectiveAdminId);
+      batchesQ = batchesQ.eq('admin_id', effectiveAdminId);
+      eventsQ = eventsQ.or(`admin_id.eq.${effectiveAdminId},is_global.eq.true`);
+    }
+
+    const [studentsRes, subjectsRes, batchesRes, batchStudentsRes, eventsRes, adminsRes] = await Promise.all([
+      studentsQ,
+      subjectsQ,
+      batchesQ,
+      batchStudentsQ,
+      eventsQ,
+      supabase.from('admins').select('*').order('classroom_name', { ascending: true }),
+    ]);
+
+    const initialError =
+      studentsRes.error ||
+      subjectsRes.error ||
+      batchesRes.error ||
+      batchStudentsRes.error ||
+      eventsRes.error;
+    if (initialError) throw new Error(initialError.message);
+
+    const students = studentsRes.data || [];
+    const subjects = subjectsRes.data || [];
+    const batches = batchesRes.data || [];
+    const allBatchStudents = batchStudentsRes.data || [];
+    const batchStudents = effectiveAdminId
+      ? allBatchStudents.filter((bs) => (bs.batches as unknown as { admin_id: string })?.admin_id === effectiveAdminId)
+      : allBatchStudents;
+    const events = eventsRes.data || [];
+    const admins = adminsRes.data || [];
+
+    // 2. Fetch Classes with pagination
     const classes: BackupClass[] = [];
     const PAGE_SIZE = 1000;
     let fromClass = 0;
     let hasMoreClasses = true;
 
     while (hasMoreClasses) {
-      const { data, error } = await supabase
+      let classesQ = supabase
         .from('classes')
         .select('*, subjects(id, name, type), batches(id, name)')
         .order('date', { ascending: true })
         .order('start_time', { ascending: true })
         .range(fromClass, fromClass + PAGE_SIZE - 1);
 
+      if (effectiveAdminId) {
+        classesQ = classesQ.eq('admin_id', effectiveAdminId);
+      }
+
+      const { data, error } = await classesQ;
       if (error) throw new Error(error.message);
       if (data && data.length > 0) {
         classes.push(...(data as unknown as BackupClass[]));
@@ -123,24 +162,30 @@ interface BackupAttendance {
       }
     }
 
-    // 3. Fetch Attendance records with range pagination
+    // 3. Fetch Attendance records with pagination
     const attendance: BackupAttendance[] = [];
-    let fromAtt = 0;
-    let hasMoreAtt = true;
+    const classIds = classes.map((c) => c.id);
 
-    while (hasMoreAtt) {
-      const { data, error } = await supabase
-        .from('attendance')
-        .select('*')
-        .range(fromAtt, fromAtt + PAGE_SIZE - 1);
+    if (classIds.length > 0) {
+      let fromAtt = 0;
+      let hasMoreAtt = true;
 
-      if (error) throw new Error(error.message);
-      if (data && data.length > 0) {
-        attendance.push(...(data as unknown as BackupAttendance[]));
-        if (data.length < PAGE_SIZE) hasMoreAtt = false;
-        else fromAtt += PAGE_SIZE;
-      } else {
-        hasMoreAtt = false;
+      while (hasMoreAtt) {
+        const attQ = supabase
+          .from('attendance')
+          .select('*')
+          .in('class_id', classIds)
+          .range(fromAtt, fromAtt + PAGE_SIZE - 1);
+
+        const { data, error } = await attQ;
+        if (error) throw new Error(error.message);
+        if (data && data.length > 0) {
+          attendance.push(...(data as unknown as BackupAttendance[]));
+          if (data.length < PAGE_SIZE) hasMoreAtt = false;
+          else fromAtt += PAGE_SIZE;
+        } else {
+          hasMoreAtt = false;
+        }
       }
     }
 
@@ -148,8 +193,9 @@ interface BackupAttendance {
     const studentNameByRoll = new Map(students.map((s) => [s.roll_number, s.name]));
     const classById = new Map(classes.map((c) => [c.id, c]));
     const batchNameById = new Map(batches.map((b) => [b.id, b.name]));
+    const adminMap = new Map(admins.map((a) => [a.id, a]));
 
-    // Aggregate summary: "student|subject" -> { attended, absent }
+    // Aggregate summary
     const summaryTally = new Map<
       string,
       { rollNumber: string; subjectId: string; attended: number; absent: number }
@@ -175,20 +221,50 @@ interface BackupAttendance {
     workbook.creator = 'Attendance Hub Enterprise';
     workbook.created = new Date();
 
+    // Sheet 0: Classrooms (if Super Admin master export)
+    if (exportAll) {
+      addSheet(
+        workbook,
+        'Classrooms',
+        [
+          { header: 'Classroom Name', key: 'cname', width: 30 },
+          { header: 'Classroom Code', key: 'code', width: 18 },
+          { header: 'Admin Name', key: 'aname', width: 25 },
+          { header: 'Status', key: 'status', width: 12 },
+          { header: 'Created On', key: 'created', width: 16 },
+        ],
+        admins.map((a) => [
+          sanitizeFormula(a.classroom_name),
+          sanitizeFormula(a.classroom_code),
+          sanitizeFormula(a.name),
+          a.is_active ? 'Active' : 'Inactive',
+          formatDateOnly(a.created_at),
+        ])
+      );
+    }
+
     // Sheet 1: Students
     addSheet(
       workbook,
       'Students',
       [
-        { header: 'Roll Number', key: 'roll', width: 20 },
+        { header: 'Student Login ID', key: 'sid', width: 22 },
+        { header: 'Roll Number', key: 'roll', width: 16 },
         { header: 'Name', key: 'name', width: 30 },
+        ...(exportAll ? [{ header: 'Classroom Code', key: 'ccode', width: 16 }] : []),
         { header: 'Registered On', key: 'reg', width: 16 },
       ],
-      students.map((s) => [
-        sanitizeFormula(s.roll_number),
-        sanitizeFormula(s.name),
-        formatDateOnly(s.created_at),
-      ])
+      students.map((s) => {
+        const cCode = adminMap.get(s.admin_id)?.classroom_code || '';
+        const studentLoginId = `${cCode}${s.roll_number}`;
+        return [
+          sanitizeFormula(studentLoginId),
+          sanitizeFormula(s.roll_number),
+          sanitizeFormula(s.name),
+          ...(exportAll ? [sanitizeFormula(cCode)] : []),
+          formatDateOnly(s.created_at),
+        ];
+      })
     );
 
     // Sheet 2: Subjects
@@ -199,12 +275,14 @@ interface BackupAttendance {
         { header: 'Name', key: 'name', width: 35 },
         { header: 'Type', key: 'type', width: 14 },
         { header: 'Min Required %', key: 'min', width: 16 },
+        ...(exportAll ? [{ header: 'Classroom Code', key: 'ccode', width: 16 }] : []),
         { header: 'Created On', key: 'created', width: 16 },
       ],
       subjects.map((s) => [
         sanitizeFormula(s.name),
         getSubjectTypeOption(s.type).label,
         getMinAttendance(s.type),
+        ...(exportAll ? [sanitizeFormula(adminMap.get(s.admin_id)?.classroom_code || '')] : []),
         formatDateOnly(s.created_at),
       ])
     );
@@ -216,11 +294,13 @@ interface BackupAttendance {
       [
         { header: 'Batch Name', key: 'name', width: 25 },
         { header: 'Subject', key: 'subject', width: 35 },
+        ...(exportAll ? [{ header: 'Classroom Code', key: 'ccode', width: 16 }] : []),
         { header: 'Created On', key: 'created', width: 16 },
       ],
       batches.map((b) => [
         sanitizeFormula(b.name),
         sanitizeFormula(b.subjects?.name || 'Unknown'),
+        ...(exportAll ? [sanitizeFormula(adminMap.get(b.admin_id)?.classroom_code || '')] : []),
         formatDateOnly(b.created_at),
       ])
     );
@@ -246,7 +326,7 @@ interface BackupAttendance {
       })
     );
 
-    // Sheet 5: Classes (including Batch Name)
+    // Sheet 5: Classes
     addSheet(
       workbook,
       'Classes',
@@ -268,7 +348,7 @@ interface BackupAttendance {
       ])
     );
 
-    // Sheet 6: Attendance Log (chronological)
+    // Sheet 6: Attendance Log
     addSheet(
       workbook,
       'Attendance Log',
@@ -309,20 +389,26 @@ interface BackupAttendance {
         { header: 'Title', key: 'title', width: 35 },
         { header: 'Date', key: 'date', width: 14 },
         { header: 'Description', key: 'desc', width: 50 },
+        { header: 'Scope', key: 'scope', width: 14 },
         { header: 'Created On', key: 'created', width: 16 },
       ],
       events.map((ev) => [
         sanitizeFormula(ev.title),
         formatDateOnly(ev.date),
         sanitizeFormula(ev.description || ''),
+        ev.is_global ? 'Global' : 'Classroom',
         formatDateOnly(ev.created_at),
       ])
     );
 
-    // Sheet 8: Summary (per student x subject vs minimum requirement)
+    // Sheet 8: Summary
     const summaryRows: (string | number)[][] = [];
     students.forEach((s) => {
-      subjects.forEach((sub) => {
+      const studentSubjects = effectiveAdminId
+        ? subjects
+        : subjects.filter((sub) => sub.admin_id === s.admin_id);
+
+      studentSubjects.forEach((sub) => {
         const type = normalizeSubjectType(sub.type);
         const minRequired = getMinAttendance(type);
         const tally =
@@ -366,7 +452,6 @@ interface BackupAttendance {
       summaryRows
     );
 
-    // Highlight students below the requirement
     summaryRows.forEach((row, idx) => {
       if (row[9] === 'No') {
         summaryWs.getRow(idx + 2).eachCell((cell) => {
@@ -375,7 +460,10 @@ interface BackupAttendance {
       }
     });
 
-    const filename = `attendance-backup-${formatDateOnly(new Date().toISOString())}.xlsx`;
+    const scopeLabel = effectiveAdminId
+      ? adminMap.get(effectiveAdminId)?.classroom_code || 'classroom'
+      : 'master';
+    const filename = `attendance-${scopeLabel}-backup-${formatDateOnly(new Date().toISOString())}.xlsx`;
     const buffer = await workbook.xlsx.writeBuffer();
 
     return new Response(buffer, {

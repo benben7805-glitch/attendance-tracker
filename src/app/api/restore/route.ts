@@ -11,7 +11,6 @@ import { normalizeSubjectType } from '@/lib/attendance';
 // classes, attendance, and events.
 // ==========================================
 
-const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
 const CHUNK_SIZE = 500;
 
 interface ParsedStudent {
@@ -227,9 +226,9 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Forbidden: Cross-site request rejected.' }, { status: 403 });
   }
 
-  // Admin authentication check
+  // Admin or Super Admin authentication check
   const session = await getSession();
-  if (session.role !== 'admin') {
+  if (session.role !== 'admin' && session.role !== 'super_admin') {
     return Response.json({ error: 'Unauthorized: Admin access required.' }, { status: 401 });
   }
 
@@ -240,6 +239,29 @@ export async function POST(request: Request) {
       return Response.json({ error: 'No file was uploaded.' }, { status: 400 });
     }
     const file = fileEntry as File;
+
+    // Resolve target classroom ID
+    let effectiveAdminId = session.adminId;
+    if (session.role === 'super_admin') {
+      const formClassroom = formData.get('classroom_id');
+      if (formClassroom && typeof formClassroom === 'string') {
+        effectiveAdminId = formClassroom;
+      } else if (session.activeAdminId) {
+        effectiveAdminId = session.activeAdminId;
+      } else {
+        const { data: defAdmin } = await supabase
+          .from('admins')
+          .select('id')
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        effectiveAdminId = defAdmin?.id || 'a0000000-0000-0000-0000-000000000001';
+      }
+    }
+
+    if (!effectiveAdminId) {
+      return Response.json({ error: 'Target classroom could not be resolved.' }, { status: 400 });
+    }
 
     const workbook = new ExcelJS.Workbook();
     try {
@@ -436,27 +458,44 @@ export async function POST(request: Request) {
       return seenSubjectNames.has(key) ? false : (seenSubjectNames.add(key), true);
     });
 
-    // ---------- Wipe existing data in strict child-first order ----------
-    const wipeOrder: { table: string; column: string }[] = [
-      { table: 'attendance', column: 'id' },
-      { table: 'batch_students', column: 'batch_id' },
-      { table: 'classes', column: 'id' },
-      { table: 'batches', column: 'id' },
-      { table: 'events', column: 'id' },
-      { table: 'subjects', column: 'id' },
-      { table: 'students', column: 'roll_number' },
-    ];
-    for (const { table, column } of wipeOrder) {
-      const { error } = await supabase.from(table).delete().neq(column, ZERO_UUID);
-      if (error) {
-        throw new Error(`Failed to clear existing "${table}" before restore: ${error.message}`);
-      }
+    // ---------- Wipe existing data for target classroom in strict child-first order ----------
+    // 1. Fetch class IDs for this classroom to wipe attendance
+    const { data: adminClasses } = await supabase
+      .from('classes')
+      .select('id')
+      .eq('admin_id', effectiveAdminId);
+
+    if (adminClasses && adminClasses.length > 0) {
+      const classIds = adminClasses.map((c) => c.id);
+      await supabase.from('attendance').delete().in('class_id', classIds);
     }
+
+    // 2. Fetch batch IDs for this classroom to wipe batch_students
+    const { data: adminBatches } = await supabase
+      .from('batches')
+      .select('id')
+      .eq('admin_id', effectiveAdminId);
+
+    if (adminBatches && adminBatches.length > 0) {
+      const batchIds = adminBatches.map((b) => b.id);
+      await supabase.from('batch_students').delete().in('batch_id', batchIds);
+    }
+
+    // 3. Clear classes, batches, events, subjects, students strictly for this classroom
+    await supabase.from('classes').delete().eq('admin_id', effectiveAdminId);
+    await supabase.from('batches').delete().eq('admin_id', effectiveAdminId);
+    await supabase.from('events').delete().eq('admin_id', effectiveAdminId).eq('is_global', false);
+    await supabase.from('subjects').delete().eq('admin_id', effectiveAdminId);
+    await supabase.from('students').delete().eq('admin_id', effectiveAdminId);
 
     // ---------- Restore Students ----------
     await insertChunked(
       'students',
-      studentRows.map((s) => ({ roll_number: s.rollNumber, name: s.name })),
+      studentRows.map((s) => ({
+        admin_id: effectiveAdminId,
+        roll_number: s.rollNumber,
+        name: s.name,
+      })),
       'roll_number'
     );
 
@@ -464,7 +503,11 @@ export async function POST(request: Request) {
     const subjectIdByName = new Map<string, string>();
     const insertedSubjects = await insertChunked(
       'subjects',
-      subjectRows.map((s) => ({ name: s.name, type: s.type })),
+      subjectRows.map((s) => ({
+        admin_id: effectiveAdminId,
+        name: s.name,
+        type: s.type,
+      })),
       'id, name, type'
     );
     insertedSubjects.forEach((row) => {
@@ -483,7 +526,11 @@ export async function POST(request: Request) {
     if (missingSubjects.length > 0) {
       const insertedMissing = await insertChunked(
         'subjects',
-        missingSubjects.map((name) => ({ name, type: 'theory' })),
+        missingSubjects.map((name) => ({
+          admin_id: effectiveAdminId,
+          name,
+          type: 'theory',
+        })),
         'id, name'
       );
       insertedMissing.forEach((row) => {
@@ -505,7 +552,7 @@ export async function POST(request: Request) {
       const key = `${subId}|${b.name.toLowerCase()}`;
       if (seenBatchKeys.has(key)) continue;
       seenBatchKeys.add(key);
-      batchRowsToInsert.push({ subject_id: subId, name: b.name });
+      batchRowsToInsert.push({ admin_id: effectiveAdminId, subject_id: subId, name: b.name });
     }
 
     if (batchRowsToInsert.length > 0) {
@@ -558,6 +605,7 @@ export async function POST(request: Request) {
       seenClassKeys.add(key);
 
       classRows.push({
+        admin_id: effectiveAdminId,
         subject_id: subjectId,
         date: c.date,
         start_time: c.startTime,
@@ -593,7 +641,6 @@ export async function POST(request: Request) {
         batchId = batchIdByKey.get(`${subjectId}|${a.batchName.toLowerCase()}`);
       }
 
-      // First try matching class with batch, fallback to non-batch class
       let classId = classKeyToId.get(`${subjectId}|${a.date}|${a.startTime}|${batchId || 'null'}`);
       if (!classId && batchId) {
         classId = classKeyToId.get(`${subjectId}|${a.date}|${a.startTime}|null`);
@@ -620,9 +667,11 @@ export async function POST(request: Request) {
       await insertChunked(
         'events',
         parsedEvents.map((ev) => ({
+          admin_id: effectiveAdminId,
           title: ev.title,
           date: ev.date,
           description: ev.description || null,
+          is_global: false,
         })),
         'id'
       );

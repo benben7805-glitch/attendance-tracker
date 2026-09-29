@@ -40,6 +40,73 @@ export function sanitizeRollNumber(input: unknown): string {
 }
 
 /**
+ * Normalizes and sanitizes a classroom code.
+ * Allows uppercase alphanumeric characters, dashes, and underscores (max 20 chars).
+ */
+export function sanitizeClassroomCode(input: unknown): string {
+  if (typeof input !== 'string') return '';
+  return input
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9\-_]/g, '')
+    .substring(0, 20);
+}
+
+export interface ParsedStudentId {
+  isPrefixed: boolean;
+  classroomCode?: string;
+  rollNumber: string;
+  cleanInput: string;
+}
+
+/**
+ * Parses a student login input (e.g. "MBBS20261", "MBBS202612", "MBBS2026-01", or "1").
+ * Matches against known active classroom codes greedily (longest first).
+ */
+export function parseStudentCompositeId(
+  input: unknown,
+  activeClassroomCodes: string[] = []
+): ParsedStudentId {
+  if (typeof input !== 'string') {
+    return { isPrefixed: false, rollNumber: '', cleanInput: '' };
+  }
+
+  // Normalize: uppercase and strip whitespace
+  const clean = input.trim().toUpperCase().replace(/[\s/]+/g, '-');
+  if (!clean) {
+    return { isPrefixed: false, rollNumber: '', cleanInput: '' };
+  }
+
+  // Sort classroom codes descending by length to match longest prefix first
+  const sortedCodes = [...activeClassroomCodes]
+    .map((c) => sanitizeClassroomCode(c))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+
+  for (const code of sortedCodes) {
+    if (clean.startsWith(code)) {
+      let remainder = clean.substring(code.length);
+      // Strip leading delimiters like '-', '_', ':'
+      remainder = remainder.replace(/^[-_:]+/, '');
+      if (remainder.length > 0) {
+        return {
+          isPrefixed: true,
+          classroomCode: code,
+          rollNumber: remainder,
+          cleanInput: clean,
+        };
+      }
+    }
+  }
+
+  return {
+    isPrefixed: false,
+    rollNumber: clean.replace(/^[-_:]+/, ''),
+    cleanInput: clean,
+  };
+}
+
+/**
  * Neutralizes Excel / CSV Formula Injection (CWE-1236).
  * If a cell string starts with '=', '+', '-', '@', '\t', or '\r',
  * it prepends a single quote so spreadsheet programs treat it as plain text.

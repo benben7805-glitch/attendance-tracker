@@ -37,6 +37,10 @@ interface StudentReport {
   student: {
     roll_number: string;
     name: string;
+    admins?: {
+      classroom_name: string;
+      classroom_code: string;
+    } | null;
   };
   subjectStats: SubjectStat[];
   absentDays: AbsentDay[];
@@ -143,6 +147,8 @@ export default function StudentDashboard() {
     .filter((ev) => ev.date >= todayLocal)
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
+  const studentLoginId = `${student.admins?.classroom_code || ''}${student.roll_number}`;
+
   return (
     <div className="container animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
       {/* Header Bar */}
@@ -150,7 +156,30 @@ export default function StudentDashboard() {
         <div style={studentProfileStyle}>
           <div style={avatarStyle}>🎓</div>
           <div>
-            <span style={rollBadgeStyle}>{student.roll_number}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
+              <span
+                style={{
+                  ...rollBadgeStyle,
+                  background: 'rgba(139, 92, 246, 0.15)',
+                  borderColor: 'rgba(139, 92, 246, 0.4)',
+                  color: '#c4b5fd',
+                  letterSpacing: '1px',
+                  fontFamily: 'monospace',
+                  fontWeight: '700',
+                }}
+                title="Your Login Student ID"
+              >
+                ID: {studentLoginId}
+              </span>
+              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                Roll No: <strong>{student.roll_number}</strong>
+              </span>
+              {student.admins && (
+                <span className="badge badge-purple" style={{ fontSize: '0.8rem', padding: '2px 8px' }}>
+                  🏫 {student.admins.classroom_name} ({student.admins.classroom_code})
+                </span>
+              )}
+            </div>
             <h1 className="text-gradient" style={studentNameStyle}>{student.name}</h1>
           </div>
         </div>
